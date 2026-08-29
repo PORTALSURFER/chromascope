@@ -17,5 +17,6 @@ The staged bootstrapper deliberately does not ask for, read, display, or write s
 | PORTALSURFER_RELEASE_UPLOAD_TOKEN | PortalSurfer server .env (raw fallback) |
 | AUDIODEV_PRODUCTS_FILE | PortalSurfer compose environment; normally /config/audiodev-products.json |
 | PORTALSURFER_DEPLOY_SERVER / USER / KEY_PATH / REMOTE_PATH / SITE_DOMAIN / PUBLIC_ORIGIN | Existing scripts/deploy.sh environment or flags |
+| PORTALSURFER_ANCHOR_PATH | Existing scripts/deploy.sh environment when Anchor is outside the site checkout's ../anchor path |
 
 PORTALSURFER_RELEASE_TOKEN is the GitHub publisher credential; the PortalSurfer server upload credential is a separate value. Keep both outside this repository and configure them through the approved GitHub/server secret mechanisms.
