@@ -11,7 +11,7 @@ secrets, SSH keys, or deployment configuration.
 
 Add these in GitHub at PORTALSURFER/chromascope -> Settings -> Secrets and
 variables -> Actions. The Apple and PortalSurfer release entries belong to
-the production environment; RADIANT_REPO_TOKEN is a repository secret.
+the production environment.
 
 | Name | Destination | Required when | Purpose |
 | --- | --- | --- | --- |
@@ -22,8 +22,6 @@ the production environment; RADIANT_REPO_TOKEN is a repository secret.
 | APPLE_NOTARY_ISSUER_ID | production environment secret | Before the first release workflow run; not preflight | App Store Connect issuer ID. No separate team-ID field is read. |
 | APPLE_CODESIGN_IDENTITY | production environment secret | Optional, only if automatic identity selection is ambiguous | Explicit Developer ID Application identity override. |
 | PORTALSURFER_RELEASE_TOKEN | production environment secret | Before a published release (publish=true); not preflight/package-only | PortalSurfer release-publisher bearer credential; it has no GitHub API scope. |
-| RADIANT_REPO_TOKEN | Repository secret | Before preflight or any release workflow | Read-only fetch of private PORTALSURFER/radiant; prefer a fine-grained token restricted to that repository with Metadata: read and Contents: read. |
-
 The generated workflows reference no GitHub Actions variables, so the
 credentials stage creates no variables. GitHub's automatic GITHUB_TOKEN is
 used for the metadata-only GitHub Release operation.
@@ -46,18 +44,13 @@ Actions public keys, and inventories names only. It then shows the checkpoint
 and requires the exact confirmation SET CREDENTIALS chromascope.
 
 Secret values are entered with terminal echo disabled and passed only through
-gh secret set ... --body - standard input. They are never accepted as
+gh secret set standard input; the --body option is omitted so gh reads that
+input. They are never accepted as
 arguments, files, environment variables, plan output, generated config, or
 logs, and are dropped after each update. A blank prompt retains an existing
 entry; required missing entries must be supplied. Non-interactive execute mode
 is rejected. The CLI never reads local Apple key files, server credentials, or
 SSH keys.
-
-RADIANT_REPO_TOKEN should be created in GitHub account Settings -> Developer
-settings -> Personal access tokens -> Fine-grained tokens, restricted to
-PORTALSURFER/radiant with Metadata: read and Contents: read. If an
-organization requires a classic token, use the narrowest available read-only
-repository scope and review its broader blast radius.
 
 PORTALSURFER_RELEASE_TOKEN is not a GitHub API token. The current PortalSurfer
 server accepts the generic release-upload bearer credential and compares it
