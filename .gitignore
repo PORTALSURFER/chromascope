@@ -1,0 +1,5 @@
+/target/
+/dist/*
+!/dist/.gitkeep
+.audiodev/
+.DS_Store

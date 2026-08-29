@@ -1,0 +1,4 @@
+[artifacts]
+clap = false
+vst3 = true
+target_dir = "C:/dist"

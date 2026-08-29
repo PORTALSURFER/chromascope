@@ -1,0 +1,13 @@
+# AudioDev release contract v1.
+schema_version = 1
+slug = "chromascope"
+display_name = "Chromascope"
+category = "Effect"
+tagline = "Cross-track spectrum viewing"
+description = "A VST3 spectrum viewer for comparing one track with companion traces in context."
+repository = "PORTALSURFER/chromascope"
+toybox_rev = "1c40aeee6062b3bcebc2799fa2ab65cf36d160a2"
+manifest_schema = 2
+formats = ["vst3"]
+platform = "macos"
+architectures = ["arm64"]

@@ -1,0 +1,27 @@
+{
+"schema_version": 1,
+"id": "chromascope",
+"name": "Chromascope",
+"category": "Effect",
+"summary": "Cross-track spectrum viewing",
+"description": "A VST3 spectrum viewer for comparing one track with companion traces in context.",
+"features": ["Live spectrum viewing for the current track", "Overlay traces from Chromascope Companion devices", "Stable colors for each companion source"],
+"formats": ["VST3"],
+"hero": null,
+"donation": {
+"currency": "EUR",
+"currency_symbol": "€",
+"currency_name": "euros",
+"preset_amounts": [5, 10, 20, 50],
+"preset_labels": ["Small thanks", "Keep it moving", "Fund a build", "Back development"],
+"custom_default": 100,
+"label": "Free software / donation supported",
+"heading": "Choose how much you’d like to support Chromascope.",
+"description": "Development is supported only by people who choose to donate."
+},
+"downloads": {
+"state": "active",
+"pending_message": "No signed release is published yet."
+},
+"chat": {"enabled": false}
+}

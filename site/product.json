@@ -1,0 +1,30 @@
+{
+"schema_version": 1,
+"product": {
+"slug": "chromascope",
+"display_name": "Chromascope",
+"category": "Effect",
+"tagline": "Cross-track spectrum viewing",
+"description": "A VST3 spectrum viewer for comparing one track with companion traces in context.",
+"repository": "PORTALSURFER/chromascope",
+"landing_path": "/plugins/chromascope/",
+"release_api": "/plugins/api/v1/products/chromascope/releases"
+},
+"distribution": {
+"platform": "macos",
+"architectures": ["arm64"],
+"formats": ["vst3"],
+"channels": ["stable", "nightly"],
+"release_manifest_schema": 2
+},
+"artwork": {
+"hero_screenshot": "/plugins/chromascope/assets/chromascope-default-912x684.png",
+"width": 912,
+"height": 684
+},
+"integration": {
+"source_file": "site/product.json",
+"landing_page_file": "site/landing-page.json",
+"automatic_registration": true
+}
+}
