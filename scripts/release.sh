@@ -70,12 +70,7 @@ fi
   exit 1
 }
 
-version="$(python3 - <<'PY'
-import pathlib
-import tomllib
-print(tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])
-PY
-)"
+version="$(sed -n '/^\[package\]/,/^\[/ { s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p; }' Cargo.toml | head -n 1)"
 [[ -n "${version}" ]] || { echo "Cargo.toml package version is missing" >&2; exit 1; }
 if [[ -n "${requested_version}" && "${requested_version}" != "${version}" ]]; then
   echo "requested version ${requested_version} does not match Cargo.toml ${version}" >&2
@@ -213,12 +208,7 @@ PY
 screenshot_name="${slug}-default-${screenshot_dimensions}.png"
 cp "${screenshot_source}" "${release_dir}/${screenshot_name}"
 
-package_name="$(python3 - <<'PY'
-import pathlib
-import tomllib
-print(tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))["package"]["name"])
-PY
-)"
+package_name="$(sed -n '/^\[package\]/,/^\[/ { s/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p; }' Cargo.toml | head -n 1)"
 lib_name="${package_name//-/_}"
 vst3_target="${tmp_root}/vst3-target"
 VST3_SDK_DIR="${VST3_SDK_DIR}" CARGO_TARGET_DIR="${vst3_target}" \
