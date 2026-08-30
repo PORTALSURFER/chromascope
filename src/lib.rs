@@ -16,6 +16,7 @@ mod alignment;
 pub mod analysis;
 pub mod constants;
 pub mod gui;
+mod highlight;
 pub mod registry;
 pub mod render;
 mod visual_system;

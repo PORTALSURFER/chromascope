@@ -74,6 +74,18 @@ hierarchy. The declarative fallback receives the same semantic palette through
 Pump-aligned `ThemeTokens`; integer Patchbay spacing is rounded from the native
 logical values.
 
+Source activation and visual highlighting are separate UI states. A normal
+source-row click changes analyzer interest and therefore controls whether that
+companion contributes a trace. A Command-click adds or removes the persistent
+highlight; adding a highlight also activates that source in the same action,
+while removing the highlight leaves activation unchanged. At most eight active
+sources can be highlighted at once; each entry owns one stable, visibly tinted
+light color, and that exact color is used for both the source row and the
+corresponding scope trace. Attempting a ninth highlight keeps all existing
+entries and reports that the set is full. Highlights are removed when their
+companion becomes inactive or leaves the registry and never add work to the
+audio callback.
+
 ## Analysis-frame alignment
 
 When a VST3 process context is present, each published frame is stamped with

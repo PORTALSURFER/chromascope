@@ -23,6 +23,27 @@ pub const MAX_BANDS: usize = 64;
 /// larger than the visible source-list viewport and does not make audio work
 /// proportional to registration count.
 pub const MAX_COMPANIONS: usize = 128;
+/// Maximum number of companion traces that can be independently highlighted.
+///
+/// Highlighting is a UI-only presentation state and is intentionally smaller
+/// than the registry and activation limits so each highlighted source can keep
+/// one distinct near-white tint.
+pub(crate) const MAX_HIGHLIGHTS: usize = 8;
+/// Stable light tints assigned to highlighted companion sources.
+///
+/// The palette is intentionally light against the charcoal graph and picker,
+/// while its saturated pastel hue shifts keep adjacent highlighted traces
+/// distinguishable instead of washing out to white.
+pub(crate) const HIGHLIGHT_COLORS: [Rgb; MAX_HIGHLIGHTS] = [
+    Rgb::new(255, 220, 200),
+    Rgb::new(200, 255, 220),
+    Rgb::new(195, 225, 255),
+    Rgb::new(230, 205, 255),
+    Rgb::new(255, 205, 225),
+    Rgb::new(220, 255, 190),
+    Rgb::new(255, 225, 175),
+    Rgb::new(200, 220, 255),
+];
 /// Number of display samples used to draw each spectrum trace.
 ///
 /// The analyzer still publishes [`MAX_BANDS`](self::MAX_BANDS) measured bands.

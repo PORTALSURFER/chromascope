@@ -7,7 +7,12 @@ The bundle contains two host-visible devices:
 
 - Chromascope is the primary viewer. It draws its own input in Pump's fixed
   primary coral and
-  lets the user select multiple companion sources for overlaid traces.
+  lets the user select multiple companion sources for overlaid traces. Ordinary
+  clicks activate sources for analysis; Command-click highlights and activates a
+  source in one action, and toggles its persistent highlight on subsequent
+  Command-clicks. Up to eight active sources can be highlighted. Each highlight
+  keeps a stable, distinct light tint mirrored in the source row and scope trace,
+  and a full set refuses new entries rather than replacing an existing highlight.
 - Chromascope Companion is an audio-track analyzer. Each live registration
   receives one stable generated fallback color, used by both its graph trace
   and its source-list marker unless Live supplies its track color. The source
