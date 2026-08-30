@@ -63,11 +63,12 @@ fallback receives the same semantic colors through its root `ThemeTokens`.
 
 Source activation is independent from visual highlighting. Normal source-row
 clicks control analyzer interest, while Command-click toggles one persistent
-highlight. Eight active sources can be highlighted simultaneously; every entry
-keeps a stable near-white tint shared by its source row and scope trace. The UI
-reports a full set without replacing an existing entry, removes highlights for
-sources that become inactive or leave the registry, and keeps all highlight
-state off the audio callback.
+highlight and activates the source when the highlight is added. Removing a
+highlight does not deactivate its source. Eight active sources can be highlighted
+simultaneously; every entry keeps a stable, visibly tinted light color shared by
+its source row and scope trace. The UI reports a full set without replacing an
+existing entry, removes highlights for sources that become inactive or leave the
+registry, and keeps all highlight state off the audio callback.
 
 ## VST3 editor paths
 

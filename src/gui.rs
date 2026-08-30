@@ -445,6 +445,13 @@ impl GuiState {
         )
     }
 
+    fn activate_companion(&mut self, id: u64, active: bool) {
+        if active && !self.selected_ids.contains(&id) && self.selected_ids.len() < MAX_COMPANIONS {
+            crate::registry::set_companion_analysis_interest(id, true);
+            self.selected_ids.push(id);
+        }
+    }
+
     fn reduce_action(&mut self, action: UiAction) {
         self.prune_stale_selections();
         self.prune_stale_highlights();
@@ -465,7 +472,11 @@ impl GuiState {
                     let active = crate::registry::snapshot_companions()
                         .iter()
                         .any(|source| source.id == id && source.active);
-                    match toggle_highlight(&mut self.highlighted.borrow_mut(), id, active) {
+                    let outcome = {
+                        let mut highlighted = self.highlighted.borrow_mut();
+                        toggle_highlight(&mut highlighted, id, active)
+                    };
+                    match outcome {
                         HighlightToggle::AtCapacity => {
                             *self.highlight_limit_reached.borrow_mut() = true;
                         }
@@ -473,6 +484,9 @@ impl GuiState {
                             *self.highlight_limit_reached.borrow_mut() = false;
                         }
                         HighlightToggle::Ignored => {}
+                    }
+                    if matches!(outcome, HighlightToggle::Added) {
+                        self.activate_companion(id, active);
                     }
                 } else if self
                     .highlighted
@@ -596,8 +610,10 @@ mod tests {
     fn multiple_companion_selection_is_reduced_without_host_selection_apis() {
         let first = crate::registry::register_companion().expect("first source");
         let second = crate::registry::register_companion().expect("second source");
+        let third = crate::registry::register_companion().expect("third source");
         let first_id = first.id();
         let second_id = second.id();
+        let third_id = third.id();
         let shared = Arc::new(ChromascopeShared::new(crate::shared::DeviceKind::Viewer));
         let mut state = GuiState::new(shared);
         state.reduce_action(UiAction::ToggleChanged {
@@ -615,16 +631,18 @@ mod tests {
         });
         assert_eq!(state.selected_ids, vec![second_id]);
         state.reduce_action(UiAction::ToggleChanged {
-            key: source_highlight_key(second_id),
+            key: source_highlight_key(third_id),
             value: true,
         });
         assert_eq!(state.highlighted.borrow().len(), 1);
-        assert_eq!(state.highlighted.borrow()[0].id, second_id);
+        assert_eq!(state.highlighted.borrow()[0].id, third_id);
+        assert_eq!(state.selected_ids, vec![second_id, third_id]);
         state.reduce_action(UiAction::ToggleChanged {
-            key: source_highlight_key(second_id),
+            key: source_highlight_key(third_id),
             value: false,
         });
         assert!(state.highlighted.borrow().is_empty());
+        assert_eq!(state.selected_ids, vec![second_id, third_id]);
     }
 
     #[test]

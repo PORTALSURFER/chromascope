@@ -10,7 +10,7 @@ pub(crate) struct HighlightedSource {
 }
 
 impl HighlightedSource {
-    /// Return the near-white tint assigned to this source.
+    /// Return the light tint assigned to this source.
     pub(crate) fn color(self) -> Rgb {
         HIGHLIGHT_COLORS
             .get(self.color_index)
@@ -133,5 +133,22 @@ mod tests {
             HighlightToggle::Ignored
         );
         assert!(highlighted.is_empty());
+    }
+
+    #[test]
+    fn highlight_palette_is_light_but_visibly_tinted() {
+        for color in HIGHLIGHT_COLORS {
+            let channels = [color.red, color.green, color.blue];
+            let brightest = *channels.iter().max().expect("palette has channels");
+            let darkest = *channels.iter().min().expect("palette has channels");
+            assert!(
+                brightest - darkest >= 40,
+                "highlight tint {color:?} is too close to white"
+            );
+            assert!(
+                u16::from(color.red) + u16::from(color.green) + u16::from(color.blue) >= 630,
+                "highlight tint {color:?} is too dark for source labels"
+            );
+        }
     }
 }

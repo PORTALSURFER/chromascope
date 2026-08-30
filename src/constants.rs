@@ -29,19 +29,20 @@ pub const MAX_COMPANIONS: usize = 128;
 /// than the registry and activation limits so each highlighted source can keep
 /// one distinct near-white tint.
 pub(crate) const MAX_HIGHLIGHTS: usize = 8;
-/// Stable near-white tints assigned to highlighted companion sources.
+/// Stable light tints assigned to highlighted companion sources.
 ///
 /// The palette is intentionally light against the charcoal graph and picker,
-/// while its small hue shifts keep adjacent highlighted traces distinguishable.
+/// while its saturated pastel hue shifts keep adjacent highlighted traces
+/// distinguishable instead of washing out to white.
 pub(crate) const HIGHLIGHT_COLORS: [Rgb; MAX_HIGHLIGHTS] = [
-    Rgb::new(255, 248, 240),
-    Rgb::new(240, 255, 246),
-    Rgb::new(238, 248, 255),
-    Rgb::new(250, 241, 255),
-    Rgb::new(255, 241, 247),
-    Rgb::new(247, 255, 231),
-    Rgb::new(255, 247, 218),
-    Rgb::new(239, 245, 255),
+    Rgb::new(255, 220, 200),
+    Rgb::new(200, 255, 220),
+    Rgb::new(195, 225, 255),
+    Rgb::new(230, 205, 255),
+    Rgb::new(255, 205, 225),
+    Rgb::new(220, 255, 190),
+    Rgb::new(255, 225, 175),
+    Rgb::new(200, 220, 255),
 ];
 /// Number of display samples used to draw each spectrum trace.
 ///

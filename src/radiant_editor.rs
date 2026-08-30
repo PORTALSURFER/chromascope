@@ -221,14 +221,23 @@ impl ChromascopeRadiantEditor {
         }
     }
 
-    fn toggle_highlight(&mut self, id: u64, active: bool) {
-        match toggle_highlight(&mut self.highlighted, id, active) {
+    fn activate_companion(&mut self, id: u64, active: bool) {
+        if active && !self.selected_ids.contains(&id) && self.selected_ids.len() < MAX_COMPANIONS {
+            crate::registry::set_companion_analysis_interest(id, true);
+            self.selected_ids.push(id);
+        }
+    }
+
+    fn toggle_highlight(&mut self, id: u64, active: bool) -> HighlightToggle {
+        let outcome = toggle_highlight(&mut self.highlighted, id, active);
+        match outcome {
             HighlightToggle::AtCapacity => self.highlight_limit_reached = true,
             HighlightToggle::Added | HighlightToggle::Removed => {
                 self.highlight_limit_reached = false;
             }
             HighlightToggle::Ignored => {}
         }
+        outcome
     }
 
     fn companion_at(
@@ -377,7 +386,9 @@ impl toybox::radiant_gui::RadiantEditor for ChromascopeRadiantEditor {
                 let companions = crate::registry::snapshot_companions();
                 if let Some((id, active)) = self.companion_at(position, &companions) {
                     if modifiers.command {
-                        self.toggle_highlight(id, active);
+                        if matches!(self.toggle_highlight(id, active), HighlightToggle::Added) {
+                            self.activate_companion(id, active);
+                        }
                     } else {
                         self.toggle_companion(id, active);
                     }
@@ -1470,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn command_click_highlights_without_changing_activation() {
+    fn command_click_highlights_and_activates_source() {
         let handle = crate::registry::register_companion().expect("source");
         let id = handle.id();
         let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
@@ -1496,17 +1507,9 @@ mod tests {
                 ..PointerModifiers::default()
             },
         });
-        assert_eq!(editor.selected_ids, Vec::<u64>::new());
-        assert_eq!(editor.highlighted.len(), 1);
-        assert_eq!(editor.highlighted[0].id, id);
-
-        editor.dispatch_event(Event::PointerPress {
-            position,
-            button: PointerButton::Primary,
-            modifiers: PointerModifiers::default(),
-        });
         assert_eq!(editor.selected_ids, vec![id]);
         assert_eq!(editor.highlighted.len(), 1);
+        assert_eq!(editor.highlighted[0].id, id);
 
         editor.dispatch_event(Event::PointerPress {
             position,
@@ -1516,8 +1519,16 @@ mod tests {
                 ..PointerModifiers::default()
             },
         });
-        assert!(editor.highlighted.is_empty());
         assert_eq!(editor.selected_ids, vec![id]);
+        assert!(editor.highlighted.is_empty());
+
+        editor.dispatch_event(Event::PointerPress {
+            position,
+            button: PointerButton::Primary,
+            modifiers: PointerModifiers::default(),
+        });
+        assert!(editor.highlighted.is_empty());
+        assert!(editor.selected_ids.is_empty());
     }
 
     #[test]

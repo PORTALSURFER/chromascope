@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn highlighted_companion_trace_uses_the_same_near_white_tint_as_picker_state() {
+    fn highlighted_companion_trace_uses_the_same_visible_tint_as_picker_state() {
         let source_color = Rgb::new(80, 240, 100);
         let mut highlighted = Vec::new();
         crate::highlight::toggle_highlight(&mut highlighted, 2, true);
