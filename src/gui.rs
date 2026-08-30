@@ -1,6 +1,7 @@
 //! Toybox declarative viewer UI and VST3 host-window adapter.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use toybox::clack_extensions::gui::{GuiSize, Window};
 use toybox::clack_plugin::plugin::PluginError;
@@ -15,10 +16,13 @@ use toybox::raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 use crate::alignment::common_target_sample;
 use crate::analysis::SpectrumFrame;
 use crate::constants::{
-    ALIGNMENT_MAX_SKEW_SAMPLES, MAIN_SPECTRUM_COLOR, MAX_COMPANIONS, PLUGIN_NAME, SPECTRUM_HEADER,
-    WINDOW_HEIGHT, WINDOW_WIDTH,
+    ALIGNMENT_MAX_SKEW_SAMPLES, COMPANION_ACTIVITY_BLINK_PERIOD_SECONDS, MAIN_SPECTRUM_COLOR,
+    MAX_COMPANIONS, PLUGIN_NAME, SPECTRUM_HEADER, WINDOW_HEIGHT, WINDOW_WIDTH,
 };
-use crate::registry::{CompanionSourceSnapshot, snapshot_companions_at};
+use crate::registry::{
+    CompanionActivitySnapshot, CompanionSourceSnapshot, snapshot_companion_activity,
+    snapshot_companions_at,
+};
 use crate::render::build_spectrum_surface_commands;
 use crate::shared::ChromascopeShared;
 use crate::visual_system::{PUMP_PALETTE, pump_aligned_theme_tokens, to_gui_color};
@@ -111,6 +115,24 @@ pub fn build_ui_spec(
     companions: &[CompanionSourceSnapshot],
     selected_ids: &[u64],
 ) -> UiSpec {
+    build_ui_spec_with_activity(
+        window_size,
+        main_frame,
+        companions,
+        selected_ids,
+        &[],
+        false,
+    )
+}
+
+fn build_ui_spec_with_activity(
+    window_size: Size,
+    main_frame: Option<SpectrumFrame>,
+    companions: &[CompanionSourceSnapshot],
+    selected_ids: &[u64],
+    activities: &[CompanionActivitySnapshot],
+    input_blink_on: bool,
+) -> UiSpec {
     let size = Size {
         width: window_size.width.max(WINDOW_WIDTH),
         height: window_size.height.max(WINDOW_HEIGHT),
@@ -166,7 +188,13 @@ pub fn build_ui_spec(
                 1,
             ),
             weighted_slot(
-                scroll_view(column_slots(source_rows(companions, selected_ids))).fill(),
+                scroll_view(column_slots(source_rows(
+                    companions,
+                    selected_ids,
+                    activities,
+                    input_blink_on,
+                )))
+                .fill(),
                 20,
             ),
         ]),
@@ -207,6 +235,8 @@ pub fn build_spec() -> UiSpec {
 fn source_rows(
     companions: &[CompanionSourceSnapshot],
     selected_ids: &[u64],
+    activities: &[CompanionActivitySnapshot],
+    input_blink_on: bool,
 ) -> Vec<toybox::gui::declarative::Slot> {
     if companions.is_empty() {
         return vec![fill_slot(
@@ -222,14 +252,29 @@ fn source_rows(
         // fill the panel and obscuring their labels/markers.
         .map(|source| {
             Slot::with_params(
-                source_row(source, selected_ids.contains(&source.id)),
+                source_row(
+                    source,
+                    selected_ids.contains(&source.id),
+                    input_blink_on && source_input_active(source.id, activities),
+                ),
                 SlotParams::intrinsic(),
             )
         })
         .collect()
 }
 
-fn source_row(source: &CompanionSourceSnapshot, selected: bool) -> Node {
+fn source_input_active(id: u64, activities: &[CompanionActivitySnapshot]) -> bool {
+    activities
+        .iter()
+        .any(|activity| activity.id == id && activity.input_active)
+}
+
+fn activity_blink_on(elapsed_seconds: f32) -> bool {
+    elapsed_seconds.rem_euclid(COMPANION_ACTIVITY_BLINK_PERIOD_SECONDS)
+        < COMPANION_ACTIVITY_BLINK_PERIOD_SECONDS * 0.5
+}
+
+fn source_row(source: &CompanionSourceSnapshot, selected: bool, input_blink_on: bool) -> Node {
     let status = if !source.active {
         "INACTIVE"
     } else if !source.analysis_requested {
@@ -246,7 +291,13 @@ fn source_row(source: &CompanionSourceSnapshot, selected: bool) -> Node {
                 .text_align_center(),
             14,
         ),
-        weighted_slot(textbox(source.name.clone()), 44),
+        weighted_slot(
+            textbox(if input_blink_on { "●" } else { " " })
+                .text_color(to_gui_color(PUMP_PALETTE.danger))
+                .text_align_center(),
+            8,
+        ),
+        weighted_slot(textbox(source.name.clone()), 40),
         weighted_slot(
             textbox(status).text_color(status_color(
                 source.active,
@@ -292,6 +343,7 @@ fn to_color(rgb: crate::constants::Rgb) -> Color {
 struct GuiState {
     shared: Arc<ChromascopeShared>,
     selected_ids: Vec<u64>,
+    blink_origin: Instant,
 }
 
 impl GuiState {
@@ -299,6 +351,7 @@ impl GuiState {
         Self {
             shared,
             selected_ids: Vec::new(),
+            blink_origin: Instant::now(),
         }
     }
 
@@ -322,7 +375,15 @@ impl GuiState {
             .copied()
             .filter(|id| companions.iter().any(|source| source.id == *id))
             .collect();
-        build_ui_spec(input.window_size, main_frame, &companions, &selected_ids)
+        let activities = snapshot_companion_activity();
+        build_ui_spec_with_activity(
+            input.window_size,
+            main_frame,
+            &companions,
+            &selected_ids,
+            &activities,
+            activity_blink_on(self.blink_origin.elapsed().as_secs_f32()),
+        )
     }
 
     fn reduce_action(&mut self, action: UiAction) {
@@ -431,7 +492,7 @@ mod tests {
 
     #[test]
     fn inactive_source_is_shown_but_cannot_be_selected_by_the_widget() {
-        let node = source_row(&source(4, false), false);
+        let node = source_row(&source(4, false), false, false);
         assert!(matches!(node, Node::Grid(_)));
         assert_eq!(source_id_from_key(&source_key(4)), Some(4));
     }

@@ -67,6 +67,15 @@ impl ChromascopeShared {
         }
     }
 
+    /// Publish pre-fader companion input activity through the lock-free
+    /// registry state. This is a no-op for the viewer runtime.
+    #[cfg(feature = "vst3")]
+    pub(crate) fn set_input_active(&self, input_active: bool) {
+        if let Some(companion) = self.companion.as_ref() {
+            companion.set_input_active(input_active);
+        }
+    }
+
     /// Return the assigned companion id when this is a registered companion.
     pub fn companion_id(&self) -> Option<u64> {
         self.companion.as_ref().map(CompanionHandle::id)

@@ -195,12 +195,26 @@ pub struct CompanionSourceSnapshot {
     pub frame: Option<SpectrumFrame>,
 }
 
+/// Internal UI snapshot of a companion's pre-fader input activity.
+///
+/// This remains separate from [`CompanionSourceSnapshot`] so adding the
+/// diagnostic marker does not change the public source-snapshot construction
+/// contract. The value is written by the audio path and read by UI paths only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CompanionActivitySnapshot {
+    /// Stable identifier for the companion registration.
+    pub(crate) id: u64,
+    /// Whether the companion's pre-fader input envelope is above its gate.
+    pub(crate) input_active: bool,
+}
+
 struct CompanionSlot {
     id: u64,
     fallback_name: String,
     fallback_color: Rgb,
     metadata: Mutex<CompanionMetadata>,
     active: AtomicBool,
+    input_active: AtomicBool,
     analysis_interest: AtomicU32,
     mailbox: Arc<SpectrumMailbox>,
 }
@@ -304,6 +318,9 @@ impl CompanionHandle {
     /// Mark the companion active or inactive without touching the registry lock.
     pub fn set_active(&self, active: bool) {
         self.slot.active.store(active, Ordering::Release);
+        if !active {
+            self.slot.input_active.store(false, Ordering::Release);
+        }
     }
 
     /// Update the optional host track name from a controller-side callback.
@@ -328,6 +345,17 @@ impl CompanionHandle {
     /// Return whether at least one viewer currently requests this source.
     pub fn analysis_requested(&self) -> bool {
         self.slot.analysis_requested()
+    }
+
+    /// Publish the companion's pre-fader input-activity gate without locking.
+    ///
+    /// This is intended for the audio callback. It does not represent channel
+    /// volume, mute state, or audibility in the final mix.
+    #[cfg(any(feature = "vst3", test))]
+    pub(crate) fn set_input_active(&self, input_active: bool) {
+        self.slot
+            .input_active
+            .store(input_active, Ordering::Release);
     }
 }
 
@@ -360,6 +388,7 @@ pub fn register_companion() -> Option<CompanionHandle> {
         fallback_color: color,
         metadata: Mutex::new(CompanionMetadata::default()),
         active: AtomicBool::new(true),
+        input_active: AtomicBool::new(false),
         analysis_interest: AtomicU32::new(0),
         mailbox: Arc::new(SpectrumMailbox::new()),
     });
@@ -435,6 +464,26 @@ pub fn snapshot_companions_at(target_sample: Option<i64>) -> Vec<CompanionSource
                 analysis_requested,
                 frame,
             }
+        })
+        .collect()
+}
+
+/// Snapshot the pre-fader input-activity state for every registered companion.
+///
+/// This is a UI/control-plane operation. The audio callback only stores the
+/// state in an atomic and never takes the registry lock.
+pub(crate) fn snapshot_companion_activity() -> Vec<CompanionActivitySnapshot> {
+    let Ok(mut registry) = companion_registry().lock() else {
+        return Vec::new();
+    };
+    registry.retain(|entry| entry.strong_count() > 0);
+    registry
+        .iter()
+        .filter_map(Weak::upgrade)
+        .map(|slot| CompanionActivitySnapshot {
+            id: slot.id,
+            input_active: slot.active.load(Ordering::Acquire)
+                && slot.input_active.load(Ordering::Acquire),
         })
         .collect()
 }
@@ -610,6 +659,37 @@ mod tests {
         assert!(!handle.analysis_requested());
         assert!(set_companion_analysis_interest(id, false));
         assert!(!handle.analysis_requested());
+    }
+
+    #[test]
+    fn companion_input_activity_is_atomic_and_visible_without_analysis_interest() {
+        let handle = register_companion().expect("test registry should have capacity");
+        let id = handle.id();
+
+        assert!(
+            !snapshot_companion_activity()
+                .into_iter()
+                .find(|source| source.id == id)
+                .expect("source activity should be discoverable")
+                .input_active
+        );
+        handle.set_input_active(true);
+        assert!(
+            snapshot_companion_activity()
+                .into_iter()
+                .find(|source| source.id == id)
+                .expect("source activity should remain discoverable")
+                .input_active
+        );
+
+        handle.set_active(false);
+        assert!(
+            !snapshot_companion_activity()
+                .into_iter()
+                .find(|source| source.id == id)
+                .expect("inactive source should remain discoverable")
+                .input_active
+        );
     }
 
     #[test]

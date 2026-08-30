@@ -10,6 +10,8 @@
 #![warn(rustdoc::missing_crate_level_docs)]
 #![allow(non_snake_case)]
 
+#[cfg(any(feature = "vst3", test))]
+mod activity;
 mod alignment;
 pub mod analysis;
 pub mod constants;

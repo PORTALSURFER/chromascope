@@ -59,6 +59,8 @@ pub const PRESENTATION_ATTACK_SECONDS: f32 = 0.020;
 /// Display-domain release time used to keep decay readable without a long
 /// additional hold after the analyzer's own release ballistics.
 pub const PRESENTATION_RELEASE_SECONDS: f32 = 0.100;
+/// Blink period for a companion's pre-fader input-activity marker.
+pub const COMPANION_ACTIVITY_BLINK_PERIOD_SECONDS: f32 = 0.800;
 /// Lowest frequency represented by the spectrum graph.
 pub const MIN_FREQUENCY_HZ: f32 = 20.0;
 /// Highest frequency represented by the spectrum graph.

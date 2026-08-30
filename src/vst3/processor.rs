@@ -6,6 +6,7 @@ use std::sync::Arc;
 use toybox::vst3::prelude::Steinberg::*;
 use toybox::vst3::prelude::*;
 
+use crate::activity::InputActivityMeter;
 use crate::analysis::SpectrumAnalyzer;
 use crate::instance_registry::{SharedRole, release_shared_for_role};
 use crate::shared::{ChromascopeShared, DeviceKind};
@@ -18,6 +19,8 @@ pub(super) struct ChromascopeVst3Processor {
     shared: Arc<ChromascopeShared>,
     analyzer: UnsafeCell<SpectrumAnalyzer>,
     analysis_requested: UnsafeCell<bool>,
+    activity_meter: UnsafeCell<InputActivityMeter>,
+    sample_rate_hz: UnsafeCell<f32>,
 }
 
 // VST3 calls the processor through a shared COM reference, while the host
@@ -34,6 +37,8 @@ impl ChromascopeVst3Processor {
             shared,
             analyzer: UnsafeCell::new(SpectrumAnalyzer::new(48_000.0)),
             analysis_requested: UnsafeCell::new(kind == DeviceKind::Viewer),
+            activity_meter: UnsafeCell::new(InputActivityMeter::default()),
+            sample_rate_hz: UnsafeCell::new(48_000.0),
         }
     }
 
@@ -42,6 +47,20 @@ impl ChromascopeVst3Processor {
             DeviceKind::Viewer => true,
             DeviceKind::Companion => self.shared.companion_analysis_requested(),
         }
+    }
+
+    /// Fail closed when the host supplies a process block we cannot consume.
+    ///
+    /// This stays on the callback's lock-free path: the meter is local to this
+    /// processor and `set_input_active` stores directly into the companion's
+    /// atomic mailbox. A rejected block must not leave a stale activity dot
+    /// visible indefinitely.
+    #[inline]
+    fn reset_input_activity(&self) {
+        unsafe {
+            (&mut *self.activity_meter.get()).reset();
+        }
+        self.shared.set_input_active(false);
     }
 }
 
@@ -222,6 +241,7 @@ impl IAudioProcessorTrait for ChromascopeVst3Processor {
             // The host calls setupProcessing outside the realtime process path.
             unsafe {
                 (&mut *self.analyzer.get()).set_sample_rate_hz(setup.sampleRate as f32);
+                *self.sample_rate_hz.get() = setup.sampleRate as f32;
             }
         }
         kResultOk
@@ -229,18 +249,26 @@ impl IAudioProcessorTrait for ChromascopeVst3Processor {
 
     unsafe fn setProcessing(&self, state: TBool) -> tresult {
         self.shared.set_active(state != 0);
+        if state == 0 {
+            unsafe {
+                (&mut *self.activity_meter.get()).reset();
+            }
+        }
         kResultOk
     }
 
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         let Some(data) = (unsafe { data.as_ref() }) else {
+            self.reset_input_activity();
             return kInvalidArgument;
         };
         if data.symbolicSampleSize != SymbolicSampleSizes_::kSample32 as i32 {
+            self.reset_input_activity();
             return process_ok();
         }
 
         let Some(buffers) = (unsafe { stereo_f32_buffers(data) }) else {
+            self.reset_input_activity();
             return process_ok();
         };
         let block_start_sample = process_context_sample_position(data);
@@ -268,9 +296,28 @@ impl IAudioProcessorTrait for ChromascopeVst3Processor {
             self.shared.publish_frame(&frame);
         }
 
+        let track_input_activity = self.kind == DeviceKind::Companion;
+        let mut input_peak: f32 = 0.0;
         for sample_index in 0..buffers.num_samples {
-            buffers.output_left[sample_index] = buffers.input_left[sample_index];
-            buffers.output_right[sample_index] = buffers.input_right[sample_index];
+            let input_left = buffers.input_left[sample_index];
+            let input_right = buffers.input_right[sample_index];
+            buffers.output_left[sample_index] = input_left;
+            buffers.output_right[sample_index] = input_right;
+            if track_input_activity {
+                input_peak = input_peak
+                    .max(finite_abs_sample(input_left))
+                    .max(finite_abs_sample(input_right));
+            }
+        }
+        if track_input_activity {
+            let input_active = unsafe {
+                (&mut *self.activity_meter.get()).process_block(
+                    input_peak,
+                    buffers.num_samples,
+                    *self.sample_rate_hz.get(),
+                )
+            };
+            self.shared.set_input_active(input_active);
         }
         process_ok()
     }
@@ -298,6 +345,18 @@ fn process_context_sample_position(data: &ProcessData) -> Option<i64> {
         Some(context.continousTimeSamples)
     } else {
         Some(context.projectTimeSamples)
+    }
+}
+
+/// Return a finite absolute sample value for the companion's pre-fader
+/// activity indicator. Peak accumulation happens in the passthrough loop so
+/// the input buffers are traversed only once per callback.
+#[inline]
+fn finite_abs_sample(sample: f32) -> f32 {
+    if sample.is_finite() {
+        sample.abs()
+    } else {
+        0.0
     }
 }
 
@@ -356,5 +415,159 @@ mod tests {
 
         let empty_data: ProcessData = unsafe { std::mem::zeroed() };
         assert_eq!(process_context_sample_position(&empty_data), None);
+    }
+
+    #[test]
+    fn companion_activity_peak_ignores_non_finite_samples() {
+        assert_eq!(finite_abs_sample(f32::NAN), 0.0);
+        assert_eq!(finite_abs_sample(f32::INFINITY), 0.0);
+        assert_eq!(finite_abs_sample(-0.25), 0.25);
+    }
+
+    struct StereoProcessFixture {
+        process_data: ProcessData,
+        _input_left: Vec<f32>,
+        _input_right: Vec<f32>,
+        _output_left: Vec<f32>,
+        _output_right: Vec<f32>,
+        _input_channel_buffers: Vec<*mut f32>,
+        _output_channel_buffers: Vec<*mut f32>,
+        _input_buses: Vec<AudioBusBuffers>,
+        _output_buses: Vec<AudioBusBuffers>,
+    }
+
+    impl StereoProcessFixture {
+        fn with_input(samples: usize, value: f32) -> Self {
+            let mut input_left = vec![value; samples];
+            let mut input_right = vec![value; samples];
+            let mut output_left = vec![0.0; samples];
+            let mut output_right = vec![0.0; samples];
+            let mut input_channel_buffers = vec![input_left.as_mut_ptr(), input_right.as_mut_ptr()];
+            let mut output_channel_buffers =
+                vec![output_left.as_mut_ptr(), output_right.as_mut_ptr()];
+            let input_bus = AudioBusBuffers {
+                numChannels: 2,
+                silenceFlags: 0,
+                __field0: AudioBusBuffers__type0 {
+                    channelBuffers32: input_channel_buffers.as_mut_ptr(),
+                },
+            };
+            let output_bus = AudioBusBuffers {
+                numChannels: 2,
+                silenceFlags: 0,
+                __field0: AudioBusBuffers__type0 {
+                    channelBuffers32: output_channel_buffers.as_mut_ptr(),
+                },
+            };
+            let mut input_buses = vec![input_bus];
+            let mut output_buses = vec![output_bus];
+            let mut process_data: ProcessData = unsafe { std::mem::zeroed() };
+            process_data.symbolicSampleSize = SymbolicSampleSizes_::kSample32 as i32;
+            process_data.numInputs = 1;
+            process_data.numOutputs = 1;
+            process_data.numSamples = i32::try_from(samples).expect("sample count must fit i32");
+            process_data.inputs = input_buses.as_mut_ptr();
+            process_data.outputs = output_buses.as_mut_ptr();
+
+            Self {
+                process_data,
+                _input_left: input_left,
+                _input_right: input_right,
+                _output_left: output_left,
+                _output_right: output_right,
+                _input_channel_buffers: input_channel_buffers,
+                _output_channel_buffers: output_channel_buffers,
+                _input_buses: input_buses,
+                _output_buses: output_buses,
+            }
+        }
+    }
+
+    fn assert_rejected_process_clears_companion_activity(
+        processor: &ChromascopeVst3Processor,
+        shared: &ChromascopeShared,
+        rejected_data: *mut ProcessData,
+        expected_result: tresult,
+    ) {
+        let mut valid = StereoProcessFixture::with_input(4_800, 1.0);
+        assert_eq!(
+            unsafe {
+                <ChromascopeVst3Processor as IAudioProcessorTrait>::process(
+                    processor,
+                    &mut valid.process_data,
+                )
+            },
+            kResultOk
+        );
+        let id = shared
+            .companion_id()
+            .expect("test companion should have a registry id");
+        assert!(
+            crate::registry::snapshot_companion_activity()
+                .into_iter()
+                .find(|activity| activity.id == id)
+                .expect("active companion should have an activity snapshot")
+                .input_active
+        );
+
+        assert_eq!(
+            unsafe {
+                <ChromascopeVst3Processor as IAudioProcessorTrait>::process(
+                    processor,
+                    rejected_data,
+                )
+            },
+            expected_result
+        );
+        assert!(
+            !crate::registry::snapshot_companion_activity()
+                .into_iter()
+                .find(|activity| activity.id == id)
+                .expect("companion should remain discoverable after rejection")
+                .input_active
+        );
+    }
+
+    #[test]
+    fn null_process_data_fails_closed_for_companion_activity() {
+        let shared = Arc::new(ChromascopeShared::new(DeviceKind::Companion));
+        let processor = ChromascopeVst3Processor::new(DeviceKind::Companion, shared.clone());
+
+        assert_rejected_process_clears_companion_activity(
+            &processor,
+            &shared,
+            std::ptr::null_mut(),
+            kInvalidArgument,
+        );
+    }
+
+    #[test]
+    fn unsupported_sample_size_fails_closed_for_companion_activity() {
+        let shared = Arc::new(ChromascopeShared::new(DeviceKind::Companion));
+        let processor = ChromascopeVst3Processor::new(DeviceKind::Companion, shared.clone());
+        let mut rejected_data: ProcessData = unsafe { std::mem::zeroed() };
+        rejected_data.symbolicSampleSize = SymbolicSampleSizes_::kSample64 as i32;
+
+        assert_rejected_process_clears_companion_activity(
+            &processor,
+            &shared,
+            &mut rejected_data,
+            kResultOk,
+        );
+    }
+
+    #[test]
+    fn invalid_stereo_buffers_fail_closed_for_companion_activity() {
+        let shared = Arc::new(ChromascopeShared::new(DeviceKind::Companion));
+        let processor = ChromascopeVst3Processor::new(DeviceKind::Companion, shared.clone());
+        let mut rejected_data: ProcessData = unsafe { std::mem::zeroed() };
+        rejected_data.symbolicSampleSize = SymbolicSampleSizes_::kSample32 as i32;
+
+        assert_rejected_process_clears_companion_activity(
+            &processor,
+            &shared,
+            &mut rejected_data,
+            kResultOk,
+        );
     }
 }
