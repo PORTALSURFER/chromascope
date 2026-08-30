@@ -44,6 +44,23 @@ jobs:
       - name: Capture checked-out source SHA
         id: source_sha
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Compute publication version
+        id: publication_version
+        env:
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          WORKFLOW_SEQUENCE: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          PACKAGE_VERSION="$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
+          PUBLICATION_VERSION="$(python3 - "${PACKAGE_VERSION}" "${RELEASE_CHANNEL}" "${WORKFLOW_SEQUENCE}" <<'PY'
+          import pathlib
+          import sys
+          sys.path.insert(0, str(pathlib.Path("scripts").resolve()))
+          from release_helper import derive_publication_version
+          print(derive_publication_version(sys.argv[1], sys.argv[2], sys.argv[3]))
+          PY
+          )"
+          echo "version=${PUBLICATION_VERSION}" >> "$GITHUB_OUTPUT"
       - name: Check release source freshness
         id: gate
         env:
@@ -115,12 +132,13 @@ jobs:
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
           APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+          RELEASE_PUBLICATION_VERSION: ${{ steps.publication_version.outputs.version }}
         run: |
           set -euo pipefail
           if [[ "${{ inputs.publish }}" == true ]]; then
-            bash scripts/release.sh --publish --channel "${{ inputs.channel }}"
+            bash scripts/release.sh --publish --channel "${{ inputs.channel }}" --publication-version "${RELEASE_PUBLICATION_VERSION}"
           else
-            bash scripts/release.sh --package-only --channel "${{ inputs.channel }}"
+            bash scripts/release.sh --package-only --channel "${{ inputs.channel }}" --publication-version "${RELEASE_PUBLICATION_VERSION}"
           fi
       - name: Upload immutable bundle for inspection
         if: steps.gate.outputs.should_release == 'true'
