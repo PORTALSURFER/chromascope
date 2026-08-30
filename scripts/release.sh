@@ -9,6 +9,7 @@ endpoint="https://portalsurfer.org"
 mode=""
 channel="stable"
 requested_version=""
+requested_publication_version=""
 build_id=""
 released_at=""
 source_ref=""
@@ -20,7 +21,9 @@ Usage: scripts/release.sh (--package-only | --publish | --preflight) [options]
 Options:
   --channel stable|rc|nightly  Release channel (default: stable)
   --version VERSION            Must match Cargo.toml
-  --build-id ID                Immutable id (default: <slug>-v<version>-<12-char HEAD>)
+  --publication-version VERSION
+                               Publication identity; core must match Cargo.toml
+  --build-id ID                Immutable id (default: <slug>-v<publication-version>-<12-char HEAD>)
   --released-at ISO8601        Release timestamp (default: current UTC time)
   --endpoint URL               PortalSurfer origin (production is exact)
   --source-ref REF             Require a non-detached checkout of REF
@@ -41,6 +44,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --channel) channel="${2:?missing channel}"; shift 2 ;;
     --version) requested_version="${2:?missing version}"; shift 2 ;;
+    --publication-version) requested_publication_version="${2:?missing publication version}"; shift 2 ;;
     --build-id) build_id="${2:?missing build id}"; shift 2 ;;
     --released-at) released_at="${2:?missing released-at}"; shift 2 ;;
     --endpoint) endpoint="${2:?missing endpoint}"; shift 2 ;;
@@ -70,25 +74,20 @@ fi
   exit 1
 }
 
-version="$(sed -n '/^\[package\]/,/^\[/ { s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p; }' Cargo.toml | head -n 1)"
-[[ -n "${version}" ]] || { echo "Cargo.toml package version is missing" >&2; exit 1; }
-if [[ -n "${requested_version}" && "${requested_version}" != "${version}" ]]; then
-  echo "requested version ${requested_version} does not match Cargo.toml ${version}" >&2
+package_version="$(sed -n '/^\[package\]/,/^\[/ { s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p; }' Cargo.toml | head -n 1)"
+[[ -n "${package_version}" ]] || { echo "Cargo.toml package version is missing" >&2; exit 1; }
+if [[ -n "${requested_version}" && "${requested_version}" != "${package_version}" ]]; then
+  echo "requested version ${requested_version} does not match Cargo.toml ${package_version}" >&2
   exit 1
 fi
-version="${requested_version:-${version}}"
-if [[ "${channel}" == stable && ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "stable release requires a stable SemVer" >&2
-  exit 1
-fi
-if [[ "${channel}" == rc && ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$ ]]; then
-  echo "RC release requires X.Y.Z-rc.N" >&2
-  exit 1
-fi
-if [[ "${channel}" == nightly && ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-nightly\.[1-9][0-9]*)?$ ]]; then
-  echo "nightly release requires X.Y.Z or X.Y.Z-nightly.N" >&2
-  exit 1
-fi
+publication_version="${requested_publication_version:-${package_version}}"
+PYTHONDONTWRITEBYTECODE=1 python3 - "${package_version}" "${publication_version}" "${channel}" <<'PY'
+import pathlib
+import sys
+sys.path.insert(0, str(pathlib.Path("scripts").resolve()))
+from release_helper import validate_publication_version
+validate_publication_version(sys.argv[1], sys.argv[2], sys.argv[3])
+PY
 
 source_sha="$(git rev-parse HEAD)"
 [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "could not resolve an exact source SHA" >&2; exit 1; }
@@ -100,7 +99,7 @@ if [[ "${mode}" != preflight ]]; then
     exit 1
   }
 fi
-build_id="${build_id:-${slug}-v${version}-${source_sha:0:12}}"
+build_id="${build_id:-${slug}-v${publication_version}-${source_sha:0:12}}"
 [[ "${build_id}" =~ ^[a-z0-9][a-z0-9._-]{1,127}$ ]] || { echo "invalid build id" >&2; exit 2; }
 released_at="${released_at:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 [[ -s CHANGELOG.md ]] || { echo "CHANGELOG.md must not be empty" >&2; exit 1; }
@@ -238,8 +237,8 @@ cat > "${bundle}/Contents/Info.plist" <<EOF
 <key>CFBundleIdentifier</key><string>com.portalsurfer.${slug}.vst3</string>
 <key>CFBundleName</key><string>Chromascope</string>
 <key>CFBundlePackageType</key><string>BNDL</string>
-<key>CFBundleShortVersionString</key><string>${version}</string>
-<key>CFBundleVersion</key><string>${version}</string>
+<key>CFBundleShortVersionString</key><string>${package_version}</string>
+<key>CFBundleVersion</key><string>${package_version}</string>
 <key>CFBundleSupportedPlatforms</key><array><string>MacOSX</string></array>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
@@ -265,7 +264,7 @@ else
   codesign --verify --deep --strict "${bundle}"
 fi
 
-archive="${release_dir}/${slug}-v${version}-macos.vst3.zip"
+archive="${release_dir}/${slug}-v${publication_version}-macos.vst3.zip"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "${bundle}" "${archive}"
 /usr/bin/ditto -x -k "${archive}" "${tmp_root}/audit"
 audit_bundle="${tmp_root}/audit/${slug}.vst3"
@@ -282,7 +281,7 @@ if [[ "${distribution}" == production ]]; then
 fi
 
 cp CHANGELOG.md "${release_dir}/CHANGELOG.md"
-python3 - "${release_dir}" "${version}" "${build_id}" "${channel}" "${released_at}" "${source_sha}" "${distribution}" "${signing_team_id}" "${vst3_notary_id}" <<'PY'
+python3 - "${release_dir}" "${publication_version}" "${build_id}" "${channel}" "${released_at}" "${source_sha}" "${distribution}" "${signing_team_id}" "${vst3_notary_id}" <<'PY'
 import pathlib
 import sys
 
@@ -290,13 +289,13 @@ folder = pathlib.Path(sys.argv[1])
 sys.path.insert(0, str(folder.parents[1].parent / "scripts"))
 from release_helper import build_manifest, canonical_json, validate_manifest
 
-out, version, build_id, channel, released_at, source_sha, distribution, team_id, notary_id = sys.argv[1:]
-vst3 = folder / f"chromascope-v{version}-macos.vst3.zip"
+out, publication_version, build_id, channel, released_at, source_sha, distribution, team_id, notary_id = sys.argv[1:]
+vst3 = folder / f"chromascope-v{publication_version}-macos.vst3.zip"
 screenshot = next(folder.glob("chromascope-default-*.png"))
 manifest = build_manifest(
     product="chromascope",
     repository="PORTALSURFER/chromascope",
-    version=version,
+    version=publication_version,
     build_id=build_id,
     channel=channel,
     released_at=released_at,
