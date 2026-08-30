@@ -104,6 +104,17 @@ This is the supported Ableton-oriented path, not selected-track discovery or
 host enumeration. Hosts that do not send the optional context callback retain
 the fallback identity.
 
+## Companion input activity
+
+The source browser's blinking red dot is a bounded diagnostic of pre-fader
+input activity at each companion device. The companion audio callback computes
+one finite stereo block peak, applies a 5 ms attack and 100 ms release envelope,
+and uses -60 dBFS on / -66 dBFS off hysteresis before publishing one atomic
+boolean to the process-local registry. The UI reads that flag and blinks the
+dot at a 0.8 second period. This indicator is deliberately not labeled as
+channel volume, mute state, loudness, or final audible activity; the current
+companion feed is before the host channel fader.
+
 ## Prototype boundaries
 
 - VST3 only; CLAP is intentionally not exported by this prototype.

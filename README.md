@@ -10,7 +10,10 @@ The bundle contains two host-visible devices:
   lets the user select multiple companion sources for overlaid traces.
 - Chromascope Companion is an audio-track analyzer. Each live registration
   receives one stable generated fallback color, used by both its graph trace
-  and its source-list marker unless Live supplies its track color.
+  and its source-list marker unless Live supplies its track color. The source
+  row also has a small blinking red input-activity dot when the companion's
+  pre-fader input exceeds the diagnostic gate; it is not a fader, mute, or
+  final-audibility indicator.
 
 Companions are discovered through an explicit process-local registry owned by
 this bundle. The prototype does not use DAW selected-track APIs or host track

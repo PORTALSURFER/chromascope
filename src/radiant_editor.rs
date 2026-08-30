@@ -19,12 +19,16 @@ use radiant::widgets::{PointerButton, TextWrap, WidgetKey};
 use crate::alignment::common_target_sample;
 use crate::analysis::SpectrumFrame;
 use crate::constants::{
-    ALIGNMENT_MAX_SKEW_SAMPLES, DISPLAY_TRACE_SAMPLES, MAIN_SPECTRUM_COLOR, MAX_BANDS,
-    MAX_COMPANIONS, MAX_FREQUENCY_HZ, MAX_LEVEL_DB, MIN_FREQUENCY_HZ, MIN_LEVEL_DB, PLUGIN_NAME,
-    PRESENTATION_FRAME_SECONDS, Rgb, SPECTRUM_HEADER, WINDOW_HEIGHT, WINDOW_WIDTH,
+    ALIGNMENT_MAX_SKEW_SAMPLES, COMPANION_ACTIVITY_BLINK_PERIOD_SECONDS, DISPLAY_TRACE_SAMPLES,
+    MAIN_SPECTRUM_COLOR, MAX_BANDS, MAX_COMPANIONS, MAX_FREQUENCY_HZ, MAX_LEVEL_DB,
+    MIN_FREQUENCY_HZ, MIN_LEVEL_DB, PLUGIN_NAME, PRESENTATION_FRAME_SECONDS, Rgb, SPECTRUM_HEADER,
+    WINDOW_HEIGHT, WINDOW_WIDTH,
 };
 use crate::presentation::PresentationState;
-use crate::registry::{CompanionSourceSnapshot, snapshot_companions_at};
+use crate::registry::{
+    CompanionActivitySnapshot, CompanionSourceSnapshot, snapshot_companion_activity,
+    snapshot_companions_at,
+};
 use crate::render::{display_trace_band_position, interpolated_band_value};
 use crate::shared::ChromascopeShared;
 use crate::visual_system::{PUMP_ALIGNED_METRICS, PUMP_ALIGNED_TYPOGRAPHY, PUMP_PALETTE};
@@ -113,6 +117,12 @@ const SCROLL_THUMB: Rgba8 = Rgba8::new(
     PUMP_PALETTE.text_muted.blue,
     210,
 );
+const ACTIVITY_DOT: Rgba8 = Rgba8::new(
+    PUMP_PALETTE.danger.red,
+    PUMP_PALETTE.danger.green,
+    PUMP_PALETTE.danger.blue,
+    255,
+);
 
 const OUTER_MARGIN: f32 = PUMP_ALIGNED_METRICS.padding;
 const PANEL_GAP: f32 = PUMP_ALIGNED_METRICS.gap;
@@ -168,6 +178,7 @@ struct ChromascopeRadiantEditor {
     source_scroll_offset: f32,
     presentation: PresentationState,
     last_paint_at: Option<Instant>,
+    activity_blink_phase_seconds: f32,
     paint_plan: SurfacePaintPlan,
 }
 
@@ -180,6 +191,7 @@ impl ChromascopeRadiantEditor {
             source_scroll_offset: 0.0,
             presentation: PresentationState::default(),
             last_paint_at: None,
+            activity_blink_phase_seconds: 0.0,
             paint_plan: SurfacePaintPlan {
                 clear_color: BACKGROUND,
                 primitives: Vec::with_capacity(256),
@@ -254,6 +266,9 @@ impl ChromascopeRadiantEditor {
             .replace(now)
             .map(|previous| now.duration_since(previous).as_secs_f32())
             .unwrap_or(PRESENTATION_FRAME_SECONDS);
+        self.activity_blink_phase_seconds = (self.activity_blink_phase_seconds + elapsed_seconds)
+            .rem_euclid(COMPANION_ACTIVITY_BLINK_PERIOD_SECONDS);
+        let activities = snapshot_companion_activity();
 
         self.paint_plan.clear_color = BACKGROUND;
         self.paint_plan.primitives.clear();
@@ -263,9 +278,11 @@ impl ChromascopeRadiantEditor {
             main_frame,
             &companions,
             &selected_ids,
+            &activities,
             self.source_scroll_offset,
             &mut self.presentation,
             elapsed_seconds,
+            self.activity_blink_phase_seconds,
         );
     }
 
@@ -409,9 +426,11 @@ fn paint_editor(
         main,
         companions,
         selected_ids,
+        &[],
         source_scroll_offset,
         &mut presentation,
         PRESENTATION_FRAME_SECONDS,
+        0.0,
     );
 }
 
@@ -422,9 +441,11 @@ fn paint_editor_with_presentation(
     main: Option<SpectrumFrame>,
     companions: &[CompanionSourceSnapshot],
     selected_ids: &[u64],
+    activities: &[CompanionActivitySnapshot],
     source_scroll_offset: f32,
     presentation: &mut PresentationState,
     elapsed_seconds: f32,
+    activity_blink_phase_seconds: f32,
 ) {
     push_fill(
         plan,
@@ -542,7 +563,9 @@ fn paint_editor_with_presentation(
         layout.sources,
         companions,
         selected_ids,
+        activities,
         source_scroll_offset,
+        activity_blink_phase_seconds,
     );
     push_rounded_outline(
         plan,
@@ -682,7 +705,9 @@ fn paint_sources(
     panel: Rect,
     companions: &[CompanionSourceSnapshot],
     selected_ids: &[u64],
+    activities: &[CompanionActivitySnapshot],
     source_scroll_offset: f32,
+    activity_blink_phase_seconds: f32,
 ) {
     let legend = Rect::from_xy_size(
         panel.min.x + 10.0,
@@ -777,11 +802,22 @@ fn paint_sources(
             Rect::from_xy_size(row.min.x + 10.0, row.center().y - 4.0, 8.0, 8.0),
             marker_color,
         );
+        if source.active
+            && activity_blink_on(activity_blink_phase_seconds)
+            && source_input_active(source.id, activities)
+        {
+            push_fill(
+                plan,
+                SOURCE_WIDGET_ID,
+                Rect::from_xy_size(row.min.x + 21.0, row.center().y - 3.0, 6.0, 6.0),
+                ACTIVITY_DOT,
+            );
+        }
         push_text(
             plan,
             SOURCE_WIDGET_ID,
             source.name.clone(),
-            Rect::from_xy_size(row.min.x + 26.0, row.min.y + 6.0, row.width() * 0.48, 16.0),
+            Rect::from_xy_size(row.min.x + 32.0, row.min.y + 6.0, row.width() * 0.45, 16.0),
             VALUE_FONT_SIZE,
             if source.active { SOFT_LABEL } else { INACTIVE },
             PaintTextAlign::Left,
@@ -866,6 +902,17 @@ fn source_content_height(companion_count: usize) -> f32 {
     } else {
         companion_count as f32 * (SOURCE_ROW_HEIGHT + SOURCE_ROW_GAP) - SOURCE_ROW_GAP
     }
+}
+
+fn source_input_active(id: u64, activities: &[CompanionActivitySnapshot]) -> bool {
+    activities
+        .iter()
+        .any(|activity| activity.id == id && activity.input_active)
+}
+
+fn activity_blink_on(phase_seconds: f32) -> bool {
+    phase_seconds.rem_euclid(COMPANION_ACTIVITY_BLINK_PERIOD_SECONDS)
+        < COMPANION_ACTIVITY_BLINK_PERIOD_SECONDS * 0.5
 }
 
 fn max_source_scroll(panel: Rect, companion_count: usize) -> f32 {
@@ -1242,6 +1289,81 @@ mod tests {
                 .iter()
                 .any(|primitive| matches!(primitive, PaintPrimitive::ClipStart(_)))
         );
+    }
+
+    #[test]
+    fn native_source_rows_blink_only_the_atomic_pre_fader_activity_marker() {
+        let size = Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32);
+        let layout = editor_layout(size);
+        let companions = [source(7, true, None)];
+        let activities = [CompanionActivitySnapshot {
+            id: 7,
+            input_active: true,
+        }];
+        let mut presentation = PresentationState::default();
+        let mut lit_plan = SurfacePaintPlan {
+            clear_color: BACKGROUND,
+            primitives: Vec::new(),
+        };
+        paint_editor_with_presentation(
+            &mut lit_plan,
+            layout,
+            Some(frame(-12.0)),
+            &companions,
+            &[],
+            &activities,
+            0.0,
+            &mut presentation,
+            PRESENTATION_FRAME_SECONDS,
+            0.0,
+        );
+
+        let lit_activity_dots = lit_plan
+            .primitives
+            .iter()
+            .filter(|primitive| {
+                matches!(
+                    primitive,
+                    PaintPrimitive::FillRect(fill)
+                        if fill.color == ACTIVITY_DOT
+                            && fill.rect.width() == 6.0
+                            && fill.rect.height() == 6.0
+                )
+            })
+            .count();
+        assert_eq!(lit_activity_dots, 1);
+        assert!(lit_plan.primitives.iter().any(|primitive| {
+            matches!(
+                primitive,
+                PaintPrimitive::FillRect(fill)
+                    if fill.color == to_color(companions[0].color)
+                        && fill.rect.width() == 8.0
+                        && fill.rect.height() == 8.0
+            )
+        }));
+
+        let mut dark_plan = SurfacePaintPlan {
+            clear_color: BACKGROUND,
+            primitives: Vec::new(),
+        };
+        paint_editor_with_presentation(
+            &mut dark_plan,
+            layout,
+            Some(frame(-12.0)),
+            &companions,
+            &[],
+            &activities,
+            0.0,
+            &mut presentation,
+            PRESENTATION_FRAME_SECONDS,
+            COMPANION_ACTIVITY_BLINK_PERIOD_SECONDS * 0.75,
+        );
+        assert!(!dark_plan.primitives.iter().any(|primitive| {
+            matches!(
+                primitive,
+                PaintPrimitive::FillRect(fill) if fill.color == ACTIVITY_DOT
+            )
+        }));
     }
 
     #[test]
