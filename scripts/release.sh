@@ -258,6 +258,8 @@ if [[ "${distribution}" == production ]]; then
   xcrun stapler staple "${bundle}" >/dev/null
   xcrun stapler validate "${bundle}" >/dev/null
   codesign -vvvv -R=notarized --check-notarization "${bundle}" >/dev/null
+  signing_team_id="$(codesign -dv --verbose=4 "${bundle}" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
+  [[ "${signing_team_id}" =~ ^[A-Z0-9]{10}$ ]] || { echo "could not capture Developer ID team identifier" >&2; exit 1; }
 else
   codesign --force --deep --sign - "${bundle}" >/dev/null
   codesign --verify --deep --strict "${bundle}"
