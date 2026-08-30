@@ -382,6 +382,11 @@ impl toybox::radiant_gui::RadiantEditor for ChromascopeRadiantEditor {
                 position,
                 button: PointerButton::Primary,
                 modifiers,
+            }
+            | Event::PointerDoubleClick {
+                position,
+                button: PointerButton::Primary,
+                modifiers,
             } => {
                 let companions = crate::registry::snapshot_companions();
                 if let Some((id, active)) = self.companion_at(position, &companions) {
@@ -1529,6 +1534,90 @@ mod tests {
         });
         assert!(editor.highlighted.is_empty());
         assert!(editor.selected_ids.is_empty());
+    }
+
+    #[test]
+    fn rapid_primary_double_click_matches_two_slow_source_toggles() {
+        let handle = crate::registry::register_companion().expect("source");
+        let id = handle.id();
+        let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+        let companions = crate::registry::snapshot_companions();
+        let source_index = companions
+            .iter()
+            .position(|source| source.id == id)
+            .expect("registered source should be snapshotted");
+        let position = source_row_rect(
+            editor_layout(Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32)).sources,
+            source_index,
+            0.0,
+        )
+        .center();
+
+        editor.dispatch_event(Event::PointerPress {
+            position,
+            button: PointerButton::Primary,
+            modifiers: PointerModifiers::default(),
+        });
+        assert_eq!(editor.selected_ids, vec![id]);
+        assert!(handle.analysis_requested());
+
+        editor.dispatch_event(Event::PointerDoubleClick {
+            position,
+            button: PointerButton::Primary,
+            modifiers: PointerModifiers::default(),
+        });
+        assert!(editor.selected_ids.is_empty());
+        assert!(!handle.analysis_requested());
+    }
+
+    #[test]
+    fn primary_double_click_ignores_non_primary_outside_and_inactive_rows() {
+        let active_handle = crate::registry::register_companion().expect("active source");
+        let inactive_handle = crate::registry::register_companion().expect("inactive source");
+        inactive_handle.set_active(false);
+        let active_id = active_handle.id();
+        let inactive_id = inactive_handle.id();
+        let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+        let companions = crate::registry::snapshot_companions();
+        let layout = editor_layout(Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32));
+        let active_index = companions
+            .iter()
+            .position(|source| source.id == active_id)
+            .expect("active source should be snapshotted");
+        let inactive_index = companions
+            .iter()
+            .position(|source| source.id == inactive_id)
+            .expect("inactive source should be snapshotted");
+        let active_position = source_row_rect(layout.sources, active_index, 0.0).center();
+        let inactive_position = source_row_rect(layout.sources, inactive_index, 0.0).center();
+        let outside_row = Point::new(
+            source_list_rect(layout.sources).min.x - 1.0,
+            active_position.y,
+        );
+
+        editor.dispatch_event(Event::PointerDoubleClick {
+            position: active_position,
+            button: PointerButton::Secondary,
+            modifiers: PointerModifiers::default(),
+        });
+        editor.dispatch_event(Event::PointerDoubleClick {
+            position: outside_row,
+            button: PointerButton::Primary,
+            modifiers: PointerModifiers::default(),
+        });
+        editor.dispatch_event(Event::PointerDoubleClick {
+            position: inactive_position,
+            button: PointerButton::Primary,
+            modifiers: PointerModifiers::default(),
+        });
+
+        assert!(editor.selected_ids.is_empty());
+        assert!(!active_handle.analysis_requested());
+        assert!(!inactive_handle.analysis_requested());
     }
 
     #[test]
