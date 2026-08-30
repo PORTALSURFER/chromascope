@@ -1,5 +1,6 @@
 //! Toybox declarative viewer UI and VST3 host-window adapter.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -390,8 +391,11 @@ fn to_color(rgb: crate::constants::Rgb) -> Color {
 struct GuiState {
     shared: Arc<ChromascopeShared>,
     selected_ids: Vec<u64>,
-    highlighted: Vec<HighlightedSource>,
-    highlight_limit_reached: bool,
+    // The declarative builder receives the state immutably.  This remains
+    // UI-thread-only state, so interior mutability lets every lifecycle
+    // rebuild apply the same cleanup as the action reducer.
+    highlighted: RefCell<Vec<HighlightedSource>>,
+    highlight_limit_reached: RefCell<bool>,
     blink_origin: Instant,
 }
 
@@ -400,8 +404,8 @@ impl GuiState {
         Self {
             shared,
             selected_ids: Vec::new(),
-            highlighted: Vec::new(),
-            highlight_limit_reached: false,
+            highlighted: RefCell::new(Vec::new()),
+            highlight_limit_reached: RefCell::new(false),
             blink_origin: Instant::now(),
         }
     }
@@ -420,22 +424,14 @@ impl GuiState {
         let companions = target
             .map(|target| snapshot_companions_at(Some(target)))
             .unwrap_or(latest_companions);
+        self.prune_stale_highlights_for(&companions);
         let selected_ids: Vec<u64> = self
             .selected_ids
             .iter()
             .copied()
             .filter(|id| companions.iter().any(|source| source.id == *id))
             .collect();
-        let highlighted: Vec<HighlightedSource> = self
-            .highlighted
-            .iter()
-            .copied()
-            .filter(|highlight| {
-                companions
-                    .iter()
-                    .any(|source| source.id == highlight.id && source.active)
-            })
-            .collect();
+        let highlighted = self.highlighted.borrow().clone();
         let activities = snapshot_companion_activity();
         build_ui_spec_with_activity(
             input.window_size,
@@ -445,7 +441,7 @@ impl GuiState {
             &highlighted,
             &activities,
             activity_blink_on(self.blink_origin.elapsed().as_secs_f32()),
-            self.highlight_limit_reached,
+            *self.highlight_limit_reached.borrow(),
         )
     }
 
@@ -469,16 +465,25 @@ impl GuiState {
                     let active = crate::registry::snapshot_companions()
                         .iter()
                         .any(|source| source.id == id && source.active);
-                    match toggle_highlight(&mut self.highlighted, id, active) {
-                        HighlightToggle::AtCapacity => self.highlight_limit_reached = true,
+                    match toggle_highlight(&mut self.highlighted.borrow_mut(), id, active) {
+                        HighlightToggle::AtCapacity => {
+                            *self.highlight_limit_reached.borrow_mut() = true;
+                        }
                         HighlightToggle::Added | HighlightToggle::Removed => {
-                            self.highlight_limit_reached = false;
+                            *self.highlight_limit_reached.borrow_mut() = false;
                         }
                         HighlightToggle::Ignored => {}
                     }
-                } else if self.highlighted.iter().any(|highlight| highlight.id == id) {
-                    self.highlighted.retain(|highlight| highlight.id != id);
-                    self.highlight_limit_reached = false;
+                } else if self
+                    .highlighted
+                    .borrow()
+                    .iter()
+                    .any(|highlight| highlight.id == id)
+                {
+                    self.highlighted
+                        .borrow_mut()
+                        .retain(|highlight| highlight.id != id);
+                    *self.highlight_limit_reached.borrow_mut() = false;
                 }
             }
         }
@@ -500,16 +505,21 @@ impl GuiState {
         }
     }
 
-    fn prune_stale_highlights(&mut self) {
-        let before = self.highlighted.len();
+    fn prune_stale_highlights(&self) {
         let companions = crate::registry::snapshot_companions();
-        self.highlighted.retain(|highlight| {
+        self.prune_stale_highlights_for(&companions);
+    }
+
+    fn prune_stale_highlights_for(&self, companions: &[CompanionSourceSnapshot]) {
+        let mut highlighted = self.highlighted.borrow_mut();
+        let before = highlighted.len();
+        highlighted.retain(|highlight| {
             companions
                 .iter()
                 .any(|source| source.id == highlight.id && source.active)
         });
-        if self.highlighted.len() != before {
-            self.highlight_limit_reached = false;
+        if highlighted.len() != before {
+            *self.highlight_limit_reached.borrow_mut() = false;
         }
     }
 }
@@ -608,13 +618,53 @@ mod tests {
             key: source_highlight_key(second_id),
             value: true,
         });
-        assert_eq!(state.highlighted.len(), 1);
-        assert_eq!(state.highlighted[0].id, second_id);
+        assert_eq!(state.highlighted.borrow().len(), 1);
+        assert_eq!(state.highlighted.borrow()[0].id, second_id);
         state.reduce_action(UiAction::ToggleChanged {
             key: source_highlight_key(second_id),
             value: false,
         });
-        assert!(state.highlighted.is_empty());
+        assert!(state.highlighted.borrow().is_empty());
+    }
+
+    #[test]
+    fn fallback_rebuild_prunes_inactive_highlight_before_reactivation() {
+        let handle = crate::registry::register_companion().expect("source");
+        let id = handle.id();
+        let mut state = GuiState::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+        state.reduce_action(UiAction::ToggleChanged {
+            key: source_highlight_key(id),
+            value: true,
+        });
+        assert!(
+            state
+                .highlighted
+                .borrow()
+                .iter()
+                .any(|highlight| highlight.id == id)
+        );
+        *state.highlight_limit_reached.borrow_mut() = true;
+
+        let input = InputState {
+            window_size: Size {
+                width: WINDOW_WIDTH,
+                height: WINDOW_HEIGHT,
+            },
+            ..InputState::default()
+        };
+        let _ = state.build_ui(&input);
+        handle.set_active(false);
+        let _ = state.build_ui(&input);
+
+        assert!(state.highlighted.borrow().is_empty());
+        assert!(!*state.highlight_limit_reached.borrow());
+
+        handle.set_active(true);
+        let _ = state.build_ui(&input);
+        assert!(state.highlighted.borrow().is_empty());
+        assert!(!*state.highlight_limit_reached.borrow());
     }
 
     #[test]
