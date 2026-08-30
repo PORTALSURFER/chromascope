@@ -20,10 +20,11 @@ use crate::alignment::common_target_sample;
 use crate::analysis::SpectrumFrame;
 use crate::constants::{
     ALIGNMENT_MAX_SKEW_SAMPLES, COMPANION_ACTIVITY_BLINK_PERIOD_SECONDS, DISPLAY_TRACE_SAMPLES,
-    MAIN_SPECTRUM_COLOR, MAX_BANDS, MAX_COMPANIONS, MAX_FREQUENCY_HZ, MAX_LEVEL_DB,
+    MAIN_SPECTRUM_COLOR, MAX_BANDS, MAX_COMPANIONS, MAX_FREQUENCY_HZ, MAX_HIGHLIGHTS, MAX_LEVEL_DB,
     MIN_FREQUENCY_HZ, MIN_LEVEL_DB, PLUGIN_NAME, PRESENTATION_FRAME_SECONDS, Rgb, SPECTRUM_HEADER,
     WINDOW_HEIGHT, WINDOW_WIDTH,
 };
+use crate::highlight::{HighlightToggle, HighlightedSource, color_for, toggle_highlight};
 use crate::presentation::PresentationState;
 use crate::registry::{
     CompanionActivitySnapshot, CompanionSourceSnapshot, snapshot_companion_activity,
@@ -175,6 +176,8 @@ struct ChromascopeRadiantEditor {
     shared: Arc<ChromascopeShared>,
     size: Vector2,
     selected_ids: Vec<u64>,
+    highlighted: Vec<HighlightedSource>,
+    highlight_limit_reached: bool,
     source_scroll_offset: f32,
     presentation: PresentationState,
     last_paint_at: Option<Instant>,
@@ -188,6 +191,8 @@ impl ChromascopeRadiantEditor {
             shared,
             size: Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32),
             selected_ids: Vec::new(),
+            highlighted: Vec::new(),
+            highlight_limit_reached: false,
             source_scroll_offset: 0.0,
             presentation: PresentationState::default(),
             last_paint_at: None,
@@ -213,6 +218,16 @@ impl ChromascopeRadiantEditor {
         } else if self.selected_ids.len() < MAX_COMPANIONS {
             crate::registry::set_companion_analysis_interest(id, true);
             self.selected_ids.push(id);
+        }
+    }
+
+    fn toggle_highlight(&mut self, id: u64, active: bool) {
+        match toggle_highlight(&mut self.highlighted, id, active) {
+            HighlightToggle::AtCapacity => self.highlight_limit_reached = true,
+            HighlightToggle::Added | HighlightToggle::Removed => {
+                self.highlight_limit_reached = false;
+            }
+            HighlightToggle::Ignored => {}
         }
     }
 
@@ -259,6 +274,7 @@ impl ChromascopeRadiantEditor {
             .copied()
             .filter(|id| companions.iter().any(|source| source.id == *id))
             .collect::<Vec<_>>();
+        self.prune_stale_highlights(&companions);
         self.presentation.retain_selected(&selected_ids);
         let now = Instant::now();
         let elapsed_seconds = self
@@ -278,11 +294,13 @@ impl ChromascopeRadiantEditor {
             main_frame,
             &companions,
             &selected_ids,
+            &self.highlighted,
             &activities,
             self.source_scroll_offset,
             &mut self.presentation,
             elapsed_seconds,
             self.activity_blink_phase_seconds,
+            self.highlight_limit_reached,
         );
     }
 
@@ -298,6 +316,18 @@ impl ChromascopeRadiantEditor {
                 let id = self.selected_ids.remove(index);
                 crate::registry::set_companion_analysis_interest(id, false);
             }
+        }
+    }
+
+    fn prune_stale_highlights(&mut self, companions: &[CompanionSourceSnapshot]) {
+        let before = self.highlighted.len();
+        self.highlighted.retain(|highlight| {
+            companions
+                .iter()
+                .any(|source| source.id == highlight.id && source.active)
+        });
+        if self.highlighted.len() != before {
+            self.highlight_limit_reached = false;
         }
     }
 }
@@ -342,11 +372,15 @@ impl toybox::radiant_gui::RadiantEditor for ChromascopeRadiantEditor {
             Event::PointerPress {
                 position,
                 button: PointerButton::Primary,
-                ..
+                modifiers,
             } => {
                 let companions = crate::registry::snapshot_companions();
                 if let Some((id, active)) = self.companion_at(position, &companions) {
-                    self.toggle_companion(id, active);
+                    if modifiers.command {
+                        self.toggle_highlight(id, active);
+                    } else {
+                        self.toggle_companion(id, active);
+                    }
                 }
             }
             _ => {}
@@ -427,10 +461,12 @@ fn paint_editor(
         companions,
         selected_ids,
         &[],
+        &[],
         source_scroll_offset,
         &mut presentation,
         PRESENTATION_FRAME_SECONDS,
         0.0,
+        false,
     );
 }
 
@@ -441,11 +477,13 @@ fn paint_editor_with_presentation(
     main: Option<SpectrumFrame>,
     companions: &[CompanionSourceSnapshot],
     selected_ids: &[u64],
+    highlighted: &[HighlightedSource],
     activities: &[CompanionActivitySnapshot],
     source_scroll_offset: f32,
     presentation: &mut PresentationState,
     elapsed_seconds: f32,
     activity_blink_phase_seconds: f32,
+    highlight_limit_reached: bool,
 ) {
     push_fill(
         plan,
@@ -537,7 +575,13 @@ fn paint_editor_with_presentation(
     push_text(
         plan,
         SOURCE_WIDGET_ID,
-        format!("SOURCES  {}/{}", selected_ids.len(), MAX_COMPANIONS),
+        format!(
+            "SOURCES  {}/{}  •  HIGHLIGHTS  {}/{}",
+            selected_ids.len(),
+            MAX_COMPANIONS,
+            highlighted.len(),
+            MAX_HIGHLIGHTS,
+        ),
         Rect::from_xy_size(
             layout.sources.min.x + PUMP_ALIGNED_METRICS.space_16,
             layout.sources.min.y + 7.0,
@@ -555,6 +599,7 @@ fn paint_editor_with_presentation(
         main,
         companions,
         selected_ids,
+        highlighted,
         presentation,
         elapsed_seconds,
     );
@@ -563,9 +608,11 @@ fn paint_editor_with_presentation(
         layout.sources,
         companions,
         selected_ids,
+        highlighted,
         activities,
         source_scroll_offset,
         activity_blink_phase_seconds,
+        highlight_limit_reached,
     );
     push_rounded_outline(
         plan,
@@ -589,12 +636,14 @@ fn layout_size(layout: EditorLayout) -> Vector2 {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_graph(
     plan: &mut SurfacePaintPlan,
     plot: Rect,
     main: Option<SpectrumFrame>,
     companions: &[CompanionSourceSnapshot],
     selected_ids: &[u64],
+    highlighted: &[HighlightedSource],
     presentation: &mut PresentationState,
     elapsed_seconds: f32,
 ) {
@@ -613,7 +662,7 @@ fn paint_graph(
                 plan,
                 GRAPH_WIDGET_ID,
                 trace_points(&frame, plot),
-                to_color(companion.color),
+                to_color(color_for(highlighted, companion.id).unwrap_or(companion.color)),
                 COMPANION_TRACE_THICKNESS,
             );
         }
@@ -700,14 +749,17 @@ fn draw_grid(plan: &mut SurfacePaintPlan, plot: Rect) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_sources(
     plan: &mut SurfacePaintPlan,
     panel: Rect,
     companions: &[CompanionSourceSnapshot],
     selected_ids: &[u64],
+    highlighted: &[HighlightedSource],
     activities: &[CompanionActivitySnapshot],
     source_scroll_offset: f32,
     activity_blink_phase_seconds: f32,
+    highlight_limit_reached: bool,
 ) {
     let legend = Rect::from_xy_size(
         panel.min.x + 10.0,
@@ -739,7 +791,11 @@ fn paint_sources(
     push_text(
         plan,
         SOURCE_WIDGET_ID,
-        "COMPANIONS  ·  SCROLL",
+        if highlight_limit_reached {
+            "HIGHLIGHTS FULL  ·  REMOVE ONE TO ADD"
+        } else {
+            "COMPANIONS  ·  SCROLL  ·  ⌘ CLICK HIGHLIGHT"
+        },
         Rect::from_xy_size(
             panel.min.x + PUMP_ALIGNED_METRICS.space_16,
             panel.min.y + SOURCE_HEADER_HEIGHT + SOURCE_LEGEND_HEIGHT,
@@ -777,6 +833,7 @@ fn paint_sources(
         };
         let row = source_row_rect(panel, index, source_scroll_offset);
         let selected = selected_ids.contains(&source.id);
+        let highlight_color = color_for(highlighted, source.id).map(to_color);
         if selected {
             let selected_row = row.inset(0.5, 0.5, 0.5, 0.5);
             push_rounded_fill(
@@ -795,7 +852,27 @@ fn paint_sources(
                 PUMP_ALIGNED_METRICS.border,
             );
         }
-        let marker_color = to_color(source.color).with_alpha_if(source.active, 255, 96);
+        if let Some(highlight_color) = highlight_color {
+            let highlighted_row = row.inset(0.5, 0.5, 0.5, 0.5);
+            push_rounded_fill(
+                plan,
+                SOURCE_WIDGET_ID,
+                highlighted_row,
+                highlight_color.with_alpha(32),
+                PUMP_ALIGNED_METRICS.base,
+            );
+            push_rounded_outline(
+                plan,
+                SOURCE_WIDGET_ID,
+                highlighted_row,
+                highlight_color.with_alpha(220),
+                PUMP_ALIGNED_METRICS.base,
+                PUMP_ALIGNED_METRICS.border,
+            );
+        }
+        let marker_color = highlight_color
+            .unwrap_or_else(|| to_color(source.color))
+            .with_alpha_if(source.active, 255, 96);
         push_fill(
             plan,
             SOURCE_WIDGET_ID,
@@ -819,7 +896,7 @@ fn paint_sources(
             source.name.clone(),
             Rect::from_xy_size(row.min.x + 32.0, row.min.y + 6.0, row.width() * 0.45, 16.0),
             VALUE_FONT_SIZE,
-            if source.active { SOFT_LABEL } else { INACTIVE },
+            highlight_color.unwrap_or(if source.active { SOFT_LABEL } else { INACTIVE }),
             PaintTextAlign::Left,
         );
         let (status, status_color) = if !source.active {
@@ -1311,11 +1388,13 @@ mod tests {
             Some(frame(-12.0)),
             &companions,
             &[],
+            &[],
             &activities,
             0.0,
             &mut presentation,
             PRESENTATION_FRAME_SECONDS,
             0.0,
+            false,
         );
 
         let lit_activity_dots = lit_plan
@@ -1352,11 +1431,13 @@ mod tests {
             Some(frame(-12.0)),
             &companions,
             &[],
+            &[],
             &activities,
             0.0,
             &mut presentation,
             PRESENTATION_FRAME_SECONDS,
             COMPANION_ACTIVITY_BLINK_PERIOD_SECONDS * 0.75,
+            false,
         );
         assert!(!dark_plan.primitives.iter().any(|primitive| {
             matches!(
@@ -1386,6 +1467,138 @@ mod tests {
         assert_eq!(editor.selected_ids, vec![11, 12]);
         editor.toggle_companion(11, true);
         assert_eq!(editor.selected_ids, vec![12]);
+    }
+
+    #[test]
+    fn command_click_highlights_without_changing_activation() {
+        let handle = crate::registry::register_companion().expect("source");
+        let id = handle.id();
+        let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+        let companions = crate::registry::snapshot_companions();
+        let source_index = companions
+            .iter()
+            .position(|source| source.id == id)
+            .expect("registered source should be snapshotted");
+        let position = source_row_rect(
+            editor_layout(Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32)).sources,
+            source_index,
+            0.0,
+        )
+        .center();
+
+        editor.dispatch_event(Event::PointerPress {
+            position,
+            button: PointerButton::Primary,
+            modifiers: PointerModifiers {
+                command: true,
+                ..PointerModifiers::default()
+            },
+        });
+        assert_eq!(editor.selected_ids, Vec::<u64>::new());
+        assert_eq!(editor.highlighted.len(), 1);
+        assert_eq!(editor.highlighted[0].id, id);
+
+        editor.dispatch_event(Event::PointerPress {
+            position,
+            button: PointerButton::Primary,
+            modifiers: PointerModifiers::default(),
+        });
+        assert_eq!(editor.selected_ids, vec![id]);
+        assert_eq!(editor.highlighted.len(), 1);
+
+        editor.dispatch_event(Event::PointerPress {
+            position,
+            button: PointerButton::Primary,
+            modifiers: PointerModifiers {
+                command: true,
+                ..PointerModifiers::default()
+            },
+        });
+        assert!(editor.highlighted.is_empty());
+        assert_eq!(editor.selected_ids, vec![id]);
+    }
+
+    #[test]
+    fn highlight_cap_refuses_replacement_and_reports_recovery_after_removal() {
+        let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+        for id in 30_000..30_000 + MAX_HIGHLIGHTS as u64 {
+            editor.toggle_highlight(id, true);
+        }
+        editor.toggle_highlight(31_000, true);
+        assert_eq!(editor.highlighted.len(), MAX_HIGHLIGHTS);
+        assert!(editor.highlight_limit_reached);
+        assert!(!editor.highlighted.iter().any(|source| source.id == 31_000));
+
+        editor.toggle_highlight(30_000, true);
+        assert_eq!(editor.highlighted.len(), MAX_HIGHLIGHTS - 1);
+        assert!(!editor.highlight_limit_reached);
+        editor.toggle_highlight(31_000, true);
+        assert!(editor.highlighted.iter().any(|source| source.id == 31_000));
+    }
+
+    #[test]
+    fn highlighted_source_uses_one_matching_tint_in_picker_and_scope() {
+        let size = Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32);
+        let layout = editor_layout(size);
+        let companions = [source(7, true, Some(frame(-24.0)))];
+        let mut highlighted = Vec::new();
+        crate::highlight::toggle_highlight(&mut highlighted, 7, true);
+        let expected = to_color(highlighted[0].color());
+        let mut presentation = PresentationState::default();
+        let mut plan = SurfacePaintPlan {
+            clear_color: BACKGROUND,
+            primitives: Vec::new(),
+        };
+
+        paint_editor_with_presentation(
+            &mut plan,
+            layout,
+            Some(frame(-12.0)),
+            &companions,
+            &[7],
+            &highlighted,
+            &[],
+            0.0,
+            &mut presentation,
+            PRESENTATION_FRAME_SECONDS,
+            0.0,
+            false,
+        );
+
+        assert!(plan.primitives.iter().any(|primitive| {
+            matches!(
+                primitive,
+                PaintPrimitive::StrokePolyline(polyline)
+                    if polyline.color == expected
+                        && polyline.width == COMPANION_TRACE_THICKNESS
+            )
+        }));
+        assert!(plan.primitives.iter().any(|primitive| {
+            matches!(
+                primitive,
+                PaintPrimitive::Text(text)
+                    if text.text.as_str() == "COMPANION 7" && text.color == expected
+            )
+        }));
+    }
+
+    #[test]
+    fn stale_highlights_are_removed_when_a_companion_leaves_the_registry() {
+        let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+        editor.toggle_highlight(41, true);
+        editor.toggle_highlight(42, true);
+        editor.highlight_limit_reached = true;
+        editor.prune_stale_highlights(&[source(41, false, None), source(42, true, None)]);
+
+        assert_eq!(editor.highlighted.len(), 1);
+        assert_eq!(editor.highlighted[0].id, 42);
+        assert!(!editor.highlight_limit_reached);
     }
 
     #[test]

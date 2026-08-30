@@ -61,6 +61,14 @@ colors remain stable per-source accents. Native spacing, rounded surfaces, and
 typography use Pump's compact 3.4/6.8/10.2/13.6 roles. The declarative
 fallback receives the same semantic colors through its root `ThemeTokens`.
 
+Source activation is independent from visual highlighting. Normal source-row
+clicks control analyzer interest, while Command-click toggles one persistent
+highlight. Eight active sources can be highlighted simultaneously; every entry
+keeps a stable near-white tint shared by its source row and scope trace. The UI
+reports a full set without replacing an existing entry, removes highlights for
+sources that become inactive or leave the registry, and keeps all highlight
+state off the audio callback.
+
 ## VST3 editor paths
 
 On macOS, the VST3 viewer uses Toybox's `radiant-vst3` AppKit bridge. Ableton

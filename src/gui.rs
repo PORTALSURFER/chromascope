@@ -17,13 +17,14 @@ use crate::alignment::common_target_sample;
 use crate::analysis::SpectrumFrame;
 use crate::constants::{
     ALIGNMENT_MAX_SKEW_SAMPLES, COMPANION_ACTIVITY_BLINK_PERIOD_SECONDS, MAIN_SPECTRUM_COLOR,
-    MAX_COMPANIONS, PLUGIN_NAME, SPECTRUM_HEADER, WINDOW_HEIGHT, WINDOW_WIDTH,
+    MAX_COMPANIONS, MAX_HIGHLIGHTS, PLUGIN_NAME, SPECTRUM_HEADER, WINDOW_HEIGHT, WINDOW_WIDTH,
 };
+use crate::highlight::{HighlightToggle, HighlightedSource, color_for, toggle_highlight};
 use crate::registry::{
     CompanionActivitySnapshot, CompanionSourceSnapshot, snapshot_companion_activity,
     snapshot_companions_at,
 };
-use crate::render::build_spectrum_surface_commands;
+use crate::render::build_spectrum_surface_commands_with_highlights;
 use crate::shared::ChromascopeShared;
 use crate::visual_system::{PUMP_PALETTE, pump_aligned_theme_tokens, to_gui_color};
 
@@ -36,6 +37,7 @@ pub const SOURCE_LIST_KEY: &str = "chromascope-sources";
 const GRAPH_KEY: &str = "chromascope-graph";
 const SOURCE_PANEL_KEY: &str = "chromascope-source-panel";
 const SOURCE_ROW_PREFIX: &str = "chromascope-source-";
+const SOURCE_HIGHLIGHT_PREFIX: &str = "chromascope-highlight-";
 const GRAPH_WEIGHT: u16 = 4;
 const SOURCE_PANEL_WEIGHT: u16 = 1;
 
@@ -121,17 +123,22 @@ pub fn build_ui_spec(
         companions,
         selected_ids,
         &[],
+        &[],
+        false,
         false,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_ui_spec_with_activity(
     window_size: Size,
     main_frame: Option<SpectrumFrame>,
     companions: &[CompanionSourceSnapshot],
     selected_ids: &[u64],
+    highlighted: &[HighlightedSource],
     activities: &[CompanionActivitySnapshot],
     input_blink_on: bool,
+    highlight_limit_reached: bool,
 ) -> UiSpec {
     let size = Size {
         width: window_size.width.max(WINDOW_WIDTH),
@@ -139,10 +146,11 @@ fn build_ui_spec_with_activity(
     };
     let graph_width = size.width.saturating_mul(GRAPH_WEIGHT as u32)
         / (GRAPH_WEIGHT + SOURCE_PANEL_WEIGHT) as u32;
-    let graph_commands = build_spectrum_surface_commands(
+    let graph_commands = build_spectrum_surface_commands_with_highlights(
         main_frame,
         companions,
         selected_ids,
+        highlighted,
         Size {
             width: graph_width,
             height: size.height.saturating_sub(16),
@@ -183,14 +191,19 @@ fn build_ui_spec_with_activity(
                 1,
             ),
             weighted_slot(
-                textbox("COMPANIONS  •  SCROLL")
-                    .text_color(to_gui_color(PUMP_PALETTE.text_primary)),
+                textbox(if highlight_limit_reached {
+                    "HIGHLIGHTS FULL  •  REMOVE ONE TO ADD"
+                } else {
+                    "COMPANIONS  •  SCROLL  •  HIGHLIGHT"
+                })
+                .text_color(to_gui_color(PUMP_PALETTE.text_primary)),
                 1,
             ),
             weighted_slot(
                 scroll_view(column_slots(source_rows(
                     companions,
                     selected_ids,
+                    highlighted,
                     activities,
                     input_blink_on,
                 )))
@@ -202,9 +215,11 @@ fn build_ui_spec_with_activity(
     .background(to_gui_color(PUMP_PALETTE.surface))
     .outline(to_gui_color(PUMP_PALETTE.border))
     .title(format!(
-        "SOURCES  {}/{}",
+        "SOURCES  {}/{}  •  HIGHLIGHTS  {}/{}",
         selected_ids.len(),
-        MAX_COMPANIONS
+        MAX_COMPANIONS,
+        highlighted.len(),
+        MAX_HIGHLIGHTS,
     ));
 
     let content = row_slots(vec![
@@ -235,6 +250,7 @@ pub fn build_spec() -> UiSpec {
 fn source_rows(
     companions: &[CompanionSourceSnapshot],
     selected_ids: &[u64],
+    highlighted: &[HighlightedSource],
     activities: &[CompanionActivitySnapshot],
     input_blink_on: bool,
 ) -> Vec<toybox::gui::declarative::Slot> {
@@ -255,6 +271,7 @@ fn source_rows(
                 source_row(
                     source,
                     selected_ids.contains(&source.id),
+                    color_for(highlighted, source.id),
                     input_blink_on && source_input_active(source.id, activities),
                 ),
                 SlotParams::intrinsic(),
@@ -274,7 +291,12 @@ fn activity_blink_on(elapsed_seconds: f32) -> bool {
         < COMPANION_ACTIVITY_BLINK_PERIOD_SECONDS * 0.5
 }
 
-fn source_row(source: &CompanionSourceSnapshot, selected: bool, input_blink_on: bool) -> Node {
+fn source_row(
+    source: &CompanionSourceSnapshot,
+    selected: bool,
+    highlight_color: Option<crate::constants::Rgb>,
+    input_blink_on: bool,
+) -> Node {
     let status = if !source.active {
         "INACTIVE"
     } else if !source.analysis_requested {
@@ -284,10 +306,20 @@ fn source_row(source: &CompanionSourceSnapshot, selected: bool, input_blink_on: 
     } else {
         "WARMING"
     };
+    let marker_color = highlight_color.unwrap_or(source.color);
     row_slots(vec![
         weighted_slot(
+            toggle(source_highlight_key(source.id), highlight_color.is_some())
+                .control_size(Size {
+                    width: 18,
+                    height: 18,
+                })
+                .disabled(!source.active),
+            14,
+        ),
+        weighted_slot(
             textbox("●")
-                .text_color(to_color(source.color))
+                .text_color(to_color(marker_color))
                 .text_align_center(),
             14,
         ),
@@ -297,7 +329,14 @@ fn source_row(source: &CompanionSourceSnapshot, selected: bool, input_blink_on: 
                 .text_align_center(),
             8,
         ),
-        weighted_slot(textbox(source.name.clone()), 40),
+        weighted_slot(
+            textbox(source.name.clone()).text_color(
+                highlight_color
+                    .map(to_color)
+                    .unwrap_or_else(|| to_gui_color(PUMP_PALETTE.text_primary)),
+            ),
+            40,
+        ),
         weighted_slot(
             textbox(status).text_color(status_color(
                 source.active,
@@ -322,8 +361,16 @@ fn source_key(id: u64) -> String {
     format!("{SOURCE_ROW_PREFIX}{id}")
 }
 
+fn source_highlight_key(id: u64) -> String {
+    format!("{SOURCE_HIGHLIGHT_PREFIX}{id}")
+}
+
 fn source_id_from_key(key: &str) -> Option<u64> {
     key.strip_prefix(SOURCE_ROW_PREFIX)?.parse().ok()
+}
+
+fn highlight_id_from_key(key: &str) -> Option<u64> {
+    key.strip_prefix(SOURCE_HIGHLIGHT_PREFIX)?.parse().ok()
 }
 
 fn status_color(active: bool, requested: bool, ready: bool) -> Color {
@@ -343,6 +390,8 @@ fn to_color(rgb: crate::constants::Rgb) -> Color {
 struct GuiState {
     shared: Arc<ChromascopeShared>,
     selected_ids: Vec<u64>,
+    highlighted: Vec<HighlightedSource>,
+    highlight_limit_reached: bool,
     blink_origin: Instant,
 }
 
@@ -351,6 +400,8 @@ impl GuiState {
         Self {
             shared,
             selected_ids: Vec::new(),
+            highlighted: Vec::new(),
+            highlight_limit_reached: false,
             blink_origin: Instant::now(),
         }
     }
@@ -375,31 +426,59 @@ impl GuiState {
             .copied()
             .filter(|id| companions.iter().any(|source| source.id == *id))
             .collect();
+        let highlighted: Vec<HighlightedSource> = self
+            .highlighted
+            .iter()
+            .copied()
+            .filter(|highlight| {
+                companions
+                    .iter()
+                    .any(|source| source.id == highlight.id && source.active)
+            })
+            .collect();
         let activities = snapshot_companion_activity();
         build_ui_spec_with_activity(
             input.window_size,
             main_frame,
             &companions,
             &selected_ids,
+            &highlighted,
             &activities,
             activity_blink_on(self.blink_origin.elapsed().as_secs_f32()),
+            self.highlight_limit_reached,
         )
     }
 
     fn reduce_action(&mut self, action: UiAction) {
         self.prune_stale_selections();
-        if let UiAction::ToggleChanged { key, value } = action
-            && let Some(id) = source_id_from_key(&key)
-        {
-            if value {
-                if !self.selected_ids.contains(&id) && self.selected_ids.len() < MAX_COMPANIONS {
-                    crate::registry::set_companion_analysis_interest(id, true);
-                    self.selected_ids.push(id);
-                }
-            } else {
-                if self.selected_ids.contains(&id) {
+        self.prune_stale_highlights();
+        if let UiAction::ToggleChanged { key, value } = action {
+            if let Some(id) = source_id_from_key(&key) {
+                if value {
+                    if !self.selected_ids.contains(&id) && self.selected_ids.len() < MAX_COMPANIONS
+                    {
+                        crate::registry::set_companion_analysis_interest(id, true);
+                        self.selected_ids.push(id);
+                    }
+                } else if self.selected_ids.contains(&id) {
                     crate::registry::set_companion_analysis_interest(id, false);
                     self.selected_ids.retain(|selected| *selected != id);
+                }
+            } else if let Some(id) = highlight_id_from_key(&key) {
+                if value {
+                    let active = crate::registry::snapshot_companions()
+                        .iter()
+                        .any(|source| source.id == id && source.active);
+                    match toggle_highlight(&mut self.highlighted, id, active) {
+                        HighlightToggle::AtCapacity => self.highlight_limit_reached = true,
+                        HighlightToggle::Added | HighlightToggle::Removed => {
+                            self.highlight_limit_reached = false;
+                        }
+                        HighlightToggle::Ignored => {}
+                    }
+                } else if self.highlighted.iter().any(|highlight| highlight.id == id) {
+                    self.highlighted.retain(|highlight| highlight.id != id);
+                    self.highlight_limit_reached = false;
                 }
             }
         }
@@ -418,6 +497,19 @@ impl GuiState {
                 let id = self.selected_ids.remove(index);
                 crate::registry::set_companion_analysis_interest(id, false);
             }
+        }
+    }
+
+    fn prune_stale_highlights(&mut self) {
+        let before = self.highlighted.len();
+        let companions = crate::registry::snapshot_companions();
+        self.highlighted.retain(|highlight| {
+            companions
+                .iter()
+                .any(|source| source.id == highlight.id && source.active)
+        });
+        if self.highlighted.len() != before {
+            self.highlight_limit_reached = false;
         }
     }
 }
@@ -467,6 +559,30 @@ mod tests {
     }
 
     #[test]
+    fn highlighted_ui_spec_passes_strict_slot_validation() {
+        let companions = [source(7, true)];
+        let mut highlighted = Vec::new();
+        assert_eq!(
+            toggle_highlight(&mut highlighted, 7, true),
+            HighlightToggle::Added
+        );
+        let spec = build_ui_spec_with_activity(
+            Size {
+                width: WINDOW_WIDTH,
+                height: WINDOW_HEIGHT,
+            },
+            None,
+            &companions,
+            &[7],
+            &highlighted,
+            &[],
+            false,
+            false,
+        );
+        measure_checked(&spec).expect("highlight UI must obey Toybox slot grammar");
+    }
+
+    #[test]
     fn multiple_companion_selection_is_reduced_without_host_selection_apis() {
         let first = crate::registry::register_companion().expect("first source");
         let second = crate::registry::register_companion().expect("second source");
@@ -488,11 +604,22 @@ mod tests {
             value: false,
         });
         assert_eq!(state.selected_ids, vec![second_id]);
+        state.reduce_action(UiAction::ToggleChanged {
+            key: source_highlight_key(second_id),
+            value: true,
+        });
+        assert_eq!(state.highlighted.len(), 1);
+        assert_eq!(state.highlighted[0].id, second_id);
+        state.reduce_action(UiAction::ToggleChanged {
+            key: source_highlight_key(second_id),
+            value: false,
+        });
+        assert!(state.highlighted.is_empty());
     }
 
     #[test]
     fn inactive_source_is_shown_but_cannot_be_selected_by_the_widget() {
-        let node = source_row(&source(4, false), false, false);
+        let node = source_row(&source(4, false), false, None, false);
         assert!(matches!(node, Node::Grid(_)));
         assert_eq!(source_id_from_key(&source_key(4)), Some(4));
     }

@@ -5,6 +5,7 @@ use crate::constants::{
     DISPLAY_TRACE_SAMPLES, MAIN_SPECTRUM_COLOR, MAX_BANDS, MAX_LEVEL_DB, MIN_FREQUENCY_HZ,
     MIN_LEVEL_DB, Rgb,
 };
+use crate::highlight::{HighlightedSource, color_for};
 use crate::registry::CompanionSourceSnapshot;
 use crate::visual_system::PUMP_PALETTE;
 use toybox::gui::declarative::SurfaceCommand;
@@ -106,6 +107,17 @@ pub fn build_spectrum_surface_commands(
     selected_ids: &[u64],
     size: Size,
 ) -> Vec<SurfaceCommand> {
+    build_spectrum_surface_commands_with_highlights(main, companions, selected_ids, &[], size)
+}
+
+/// Build the graph surface with independent source-highlight colors.
+pub(crate) fn build_spectrum_surface_commands_with_highlights(
+    main: Option<SpectrumFrame>,
+    companions: &[CompanionSourceSnapshot],
+    selected_ids: &[u64],
+    highlighted: &[HighlightedSource],
+    size: Size,
+) -> Vec<SurfaceCommand> {
     let width = size.width.max(1);
     let height = size.height.max(1);
     let plot = plot_rect(width, height);
@@ -133,7 +145,7 @@ pub fn build_spectrum_surface_commands(
             commands.push(SurfaceCommand::Polyline {
                 points: trace_points(&frame, plot),
                 thickness: COMPANION_TRACE_THICKNESS,
-                color: to_color(companion.color),
+                color: to_color(color_for(highlighted, companion.id).unwrap_or(companion.color)),
             });
         }
     }
@@ -371,6 +383,34 @@ mod tests {
             })
             .collect();
         assert_eq!(companion_colors, vec![to_color(selected_color)]);
+    }
+
+    #[test]
+    fn highlighted_companion_trace_uses_the_same_near_white_tint_as_picker_state() {
+        let source_color = Rgb::new(80, 240, 100);
+        let mut highlighted = Vec::new();
+        crate::highlight::toggle_highlight(&mut highlighted, 2, true);
+        let commands = build_spectrum_surface_commands_with_highlights(
+            None,
+            &[source(2, source_color, true, Some(frame(-30.0)))],
+            &[2],
+            &highlighted,
+            Size {
+                width: 800,
+                height: 400,
+            },
+        );
+        let colors: Vec<Color> = commands
+            .iter()
+            .filter_map(|command| match command {
+                SurfaceCommand::Polyline {
+                    color, thickness, ..
+                } if *thickness == COMPANION_TRACE_THICKNESS => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(colors, vec![to_color(highlighted[0].color())]);
+        assert_ne!(colors, vec![to_color(source_color)]);
     }
 
     #[test]
