@@ -481,8 +481,16 @@ impl toybox::radiant_gui::RadiantEditor for ChromascopeRadiantEditor {
                     self.sync_source_scroll_state(layout.sources, count);
                 }
             }
-            Event::PointerMove { position } => {
+            Event::PointerMove { position, .. } => {
                 if self.source_scrollbar_drag.is_some() {
+                    // Toybox uses this exact position as the macOS
+                    // `mouseExited:` sentinel. It is not a real drag sample;
+                    // preserve the active capture until a release or an
+                    // explicit cancellation arrives. Other out-of-view
+                    // positions remain valid and are clamped below.
+                    if position == Point::new(-1.0, -1.0) {
+                        return;
+                    }
                     let layout = editor_layout(self.size);
                     let companions = crate::registry::snapshot_companions();
                     self.handle_source_scrollbar_move(layout.sources, companions.len(), position);
@@ -498,16 +506,21 @@ impl toybox::radiant_gui::RadiantEditor for ChromascopeRadiantEditor {
                 position,
                 button: PointerButton::Primary,
                 modifiers,
+                ..
             }
             | Event::PointerDoubleClick {
                 position,
                 button: PointerButton::Primary,
                 modifiers,
+                ..
             } => {
                 let companions = crate::registry::snapshot_companions();
                 self.handle_primary_source_event(position, modifiers, &companions);
             }
             Event::ClearFocus => {
+                self.source_scrollbar_drag = None;
+            }
+            Event::PointerCaptureCancelled => {
                 self.source_scrollbar_drag = None;
             }
             _ => {}
@@ -1770,11 +1783,15 @@ mod tests {
         )));
 
         assert!(editor.handle_source_scrollbar_press(layout.sources, companions.len(), position));
-        editor.dispatch_event(Event::PointerRelease {
-            position: Point::new(-1.0, -1.0),
-            button: PointerButton::Primary,
-            modifiers: PointerModifiers::default(),
-        });
+        editor.dispatch_event(Event::pointer_release(
+            Point::new(-1.0, -1.0),
+            PointerButton::Primary,
+            PointerModifiers::default(),
+        ));
+        assert!(editor.source_scrollbar_drag.is_none());
+
+        assert!(editor.handle_source_scrollbar_press(layout.sources, companions.len(), position));
+        editor.dispatch_event(Event::pointer_capture_cancelled());
         assert!(editor.source_scrollbar_drag.is_none());
 
         assert!(editor.handle_source_scrollbar_press(layout.sources, companions.len(), position));
@@ -1797,6 +1814,47 @@ mod tests {
     }
 
     #[test]
+    fn source_scrollbar_capture_ignores_mouse_exited_sentinel_but_clamps_real_out_of_view_drag() {
+        let layout = editor_layout(Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32));
+        let companions = overflowing_sources();
+        let initial_offset = max_source_scroll(layout.sources, companions.len()) * 0.5;
+        let geometry =
+            source_scrollbar_geometry(layout.sources, companions.len(), initial_offset).unwrap();
+        let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+        editor.source_scroll_offset = initial_offset;
+
+        assert!(editor.handle_source_scrollbar_press(
+            layout.sources,
+            companions.len(),
+            geometry.thumb.center(),
+        ));
+        editor.dispatch_event(Event::pointer_move(Point::new(-1.0, -1.0)));
+        assert_eq!(editor.source_scroll_offset, initial_offset);
+        assert!(editor.source_scrollbar_drag.is_some());
+
+        assert!(editor.handle_source_scrollbar_move(
+            layout.sources,
+            companions.len(),
+            Point::new(-100.0, -100.0),
+        ));
+        assert_eq!(editor.source_scroll_offset, 0.0);
+        assert!(editor.source_scrollbar_drag.is_some());
+
+        assert!(editor.handle_source_scrollbar_move(
+            layout.sources,
+            companions.len(),
+            Point::new(geometry.hit_strip.center().x, geometry.track.max.y + 100.0),
+        ));
+        assert_eq!(
+            editor.source_scroll_offset,
+            max_source_scroll(layout.sources, companions.len())
+        );
+        assert!(editor.source_scrollbar_drag.is_some());
+    }
+
+    #[test]
     fn source_scrollbar_does_not_move_after_primary_release_outside_the_strip() {
         let layout = editor_layout(Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32));
         let companions = overflowing_sources();
@@ -1810,11 +1868,11 @@ mod tests {
             companions.len(),
             geometry.thumb.center(),
         ));
-        editor.dispatch_event(Event::PointerRelease {
-            position: Point::new(-100.0, -100.0),
-            button: PointerButton::Primary,
-            modifiers: PointerModifiers::default(),
-        });
+        editor.dispatch_event(Event::pointer_release(
+            Point::new(-100.0, -100.0),
+            PointerButton::Primary,
+            PointerModifiers::default(),
+        ));
         let released_offset = editor.source_scroll_offset;
 
         assert!(!editor.handle_source_scrollbar_move(
@@ -1874,34 +1932,30 @@ mod tests {
         )
         .center();
 
-        editor.dispatch_event(Event::PointerPress {
+        editor.dispatch_event(Event::pointer_press(
             position,
-            button: PointerButton::Primary,
-            modifiers: PointerModifiers {
+            PointerButton::Primary,
+            PointerModifiers {
                 command: true,
                 ..PointerModifiers::default()
             },
-        });
+        ));
         assert_eq!(editor.selected_ids, vec![id]);
         assert_eq!(editor.highlighted.len(), 1);
         assert_eq!(editor.highlighted[0].id, id);
 
-        editor.dispatch_event(Event::PointerPress {
+        editor.dispatch_event(Event::pointer_press(
             position,
-            button: PointerButton::Primary,
-            modifiers: PointerModifiers {
+            PointerButton::Primary,
+            PointerModifiers {
                 command: true,
                 ..PointerModifiers::default()
             },
-        });
+        ));
         assert_eq!(editor.selected_ids, vec![id]);
         assert!(editor.highlighted.is_empty());
 
-        editor.dispatch_event(Event::PointerPress {
-            position,
-            button: PointerButton::Primary,
-            modifiers: PointerModifiers::default(),
-        });
+        editor.dispatch_event(Event::primary_press(position));
         assert!(editor.highlighted.is_empty());
         assert!(editor.selected_ids.is_empty());
     }
@@ -1925,19 +1979,11 @@ mod tests {
         )
         .center();
 
-        editor.dispatch_event(Event::PointerPress {
-            position,
-            button: PointerButton::Primary,
-            modifiers: PointerModifiers::default(),
-        });
+        editor.dispatch_event(Event::primary_press(position));
         assert_eq!(editor.selected_ids, vec![id]);
         assert!(handle.analysis_requested());
 
-        editor.dispatch_event(Event::PointerDoubleClick {
-            position,
-            button: PointerButton::Primary,
-            modifiers: PointerModifiers::default(),
-        });
+        editor.dispatch_event(Event::primary_double_click(position));
         assert!(editor.selected_ids.is_empty());
         assert!(!handle.analysis_requested());
     }
@@ -1969,21 +2015,13 @@ mod tests {
             active_position.y,
         );
 
-        editor.dispatch_event(Event::PointerDoubleClick {
-            position: active_position,
-            button: PointerButton::Secondary,
-            modifiers: PointerModifiers::default(),
-        });
-        editor.dispatch_event(Event::PointerDoubleClick {
-            position: outside_row,
-            button: PointerButton::Primary,
-            modifiers: PointerModifiers::default(),
-        });
-        editor.dispatch_event(Event::PointerDoubleClick {
-            position: inactive_position,
-            button: PointerButton::Primary,
-            modifiers: PointerModifiers::default(),
-        });
+        editor.dispatch_event(Event::pointer_double_click(
+            active_position,
+            PointerButton::Secondary,
+            PointerModifiers::default(),
+        ));
+        editor.dispatch_event(Event::primary_double_click(outside_row));
+        editor.dispatch_event(Event::primary_double_click(inactive_position));
 
         assert!(editor.selected_ids.is_empty());
         assert!(!active_handle.analysis_requested());
@@ -2165,9 +2203,7 @@ mod tests {
         let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
             crate::shared::DeviceKind::Viewer,
         )));
-        editor.dispatch_event(Event::PointerModifiersChanged {
-            modifiers: PointerModifiers::default(),
-        });
+        editor.dispatch_event(Event::pointer_modifiers_changed(PointerModifiers::default()));
         assert!(editor.selected_ids.is_empty());
     }
 }
