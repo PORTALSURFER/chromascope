@@ -14,7 +14,7 @@ use radiant::runtime::{
     PaintPath, PaintPathCommand, PaintPrimitive, PaintStrokePolyline, PaintStrokeRect, PaintText,
     PaintTextAlign, PaintTextRun, SurfacePaintPlan,
 };
-use radiant::widgets::{PointerButton, TextWrap, WidgetKey};
+use radiant::widgets::{PointerButton, PointerModifiers, TextWrap, WidgetKey};
 
 use crate::alignment::common_target_sample;
 use crate::analysis::SpectrumFrame;
@@ -137,6 +137,9 @@ const SOURCE_LIST_HEADER_HEIGHT: f32 = 27.2;
 const SOURCE_ROW_HEIGHT: f32 = PUMP_ALIGNED_METRICS.control_height;
 const SOURCE_ROW_GAP: f32 = PUMP_ALIGNED_METRICS.row_gap;
 const SOURCE_SCROLL_EPSILON: f32 = 0.01;
+const SOURCE_SCROLLBAR_HIT_WIDTH: f32 = 10.0;
+const SOURCE_SCROLLBAR_TRACK_WIDTH: f32 = 3.0;
+const SOURCE_SCROLLBAR_THUMB_MIN_HEIGHT: f32 = 18.0;
 const PLOT_PADDING_LEFT: f32 = 44.0;
 const PLOT_PADDING_RIGHT: f32 = 12.0;
 const PLOT_PADDING_TOP: f32 = 10.0;
@@ -154,6 +157,20 @@ struct EditorLayout {
     graph: Rect,
     sources: Rect,
     plot: Rect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SourceScrollbarGeometry {
+    hit_strip: Rect,
+    track: Rect,
+    thumb: Rect,
+    max_scroll: f32,
+    scroll_span: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SourceScrollbarDrag {
+    Thumb { grip_fraction: f32 },
 }
 
 /// Construct the Toybox Radiant host facade used by the macOS VST3 controller.
@@ -179,6 +196,7 @@ struct ChromascopeRadiantEditor {
     highlighted: Vec<HighlightedSource>,
     highlight_limit_reached: bool,
     source_scroll_offset: f32,
+    source_scrollbar_drag: Option<SourceScrollbarDrag>,
     presentation: PresentationState,
     last_paint_at: Option<Instant>,
     activity_blink_phase_seconds: f32,
@@ -194,6 +212,7 @@ impl ChromascopeRadiantEditor {
             highlighted: Vec::new(),
             highlight_limit_reached: false,
             source_scroll_offset: 0.0,
+            source_scrollbar_drag: None,
             presentation: PresentationState::default(),
             last_paint_at: None,
             activity_blink_phase_seconds: 0.0,
@@ -250,6 +269,11 @@ impl ChromascopeRadiantEditor {
         if !list.contains(position) {
             return None;
         }
+        if source_scrollbar_geometry(layout.sources, companions.len(), self.source_scroll_offset)
+            .is_some_and(|geometry| geometry.hit_strip.contains(position))
+        {
+            return None;
+        }
         visible_source_range(companions.len(), list.height(), self.source_scroll_offset)
             .filter_map(|index| companions.get(index).map(|source| (index, source)))
             .find_map(|(index, source)| {
@@ -275,8 +299,7 @@ impl ChromascopeRadiantEditor {
             .unwrap_or(latest_companions);
         let layout = editor_layout(self.size);
         self.prune_stale_selections(&companions);
-        self.source_scroll_offset =
-            clamp_source_scroll(layout.sources, companions.len(), self.source_scroll_offset);
+        self.sync_source_scroll_state(layout.sources, companions.len());
         let selected_ids = self
             .selected_ids
             .iter()
@@ -311,6 +334,87 @@ impl ChromascopeRadiantEditor {
             self.activity_blink_phase_seconds,
             self.highlight_limit_reached,
         );
+    }
+
+    fn sync_source_scroll_state(&mut self, panel: Rect, companion_count: usize) {
+        self.source_scroll_offset =
+            clamp_source_scroll(panel, companion_count, self.source_scroll_offset);
+        if source_scrollbar_geometry(panel, companion_count, self.source_scroll_offset).is_none() {
+            self.source_scrollbar_drag = None;
+        }
+    }
+
+    fn handle_source_scrollbar_press(
+        &mut self,
+        panel: Rect,
+        companion_count: usize,
+        position: Point,
+    ) -> bool {
+        let Some(geometry) =
+            source_scrollbar_geometry(panel, companion_count, self.source_scroll_offset)
+        else {
+            self.source_scrollbar_drag = None;
+            return false;
+        };
+        if !geometry.hit_strip.contains(position) {
+            self.source_scrollbar_drag = None;
+            return false;
+        }
+
+        if geometry.thumb.contains(position) {
+            let grip_fraction =
+                ((position.y - geometry.thumb.min.y) / geometry.thumb.height()).clamp(0.0, 1.0);
+            self.source_scrollbar_drag = Some(SourceScrollbarDrag::Thumb { grip_fraction });
+        } else {
+            self.source_scrollbar_drag = None;
+            self.source_scroll_offset =
+                source_scroll_from_thumb_top(geometry, position.y - geometry.thumb.height() * 0.5);
+        }
+        true
+    }
+
+    fn handle_source_scrollbar_move(
+        &mut self,
+        panel: Rect,
+        companion_count: usize,
+        position: Point,
+    ) -> bool {
+        let Some(geometry) =
+            source_scrollbar_geometry(panel, companion_count, self.source_scroll_offset)
+        else {
+            self.source_scrollbar_drag = None;
+            return false;
+        };
+        let Some(SourceScrollbarDrag::Thumb { grip_fraction }) = self.source_scrollbar_drag else {
+            return false;
+        };
+
+        self.source_scroll_offset = source_scroll_from_thumb_top(
+            geometry,
+            position.y - geometry.thumb.height() * grip_fraction,
+        );
+        true
+    }
+
+    fn handle_primary_source_event(
+        &mut self,
+        position: Point,
+        modifiers: PointerModifiers,
+        companions: &[CompanionSourceSnapshot],
+    ) {
+        let layout = editor_layout(self.size);
+        if self.handle_source_scrollbar_press(layout.sources, companions.len(), position) {
+            return;
+        }
+        if let Some((id, active)) = self.companion_at(position, companions) {
+            if modifiers.command {
+                if matches!(self.toggle_highlight(id, active), HighlightToggle::Added) {
+                    self.activate_companion(id, active);
+                }
+            } else {
+                self.toggle_companion(id, active);
+            }
+        }
     }
 
     fn prune_stale_selections(&mut self, companions: &[CompanionSourceSnapshot]) {
@@ -352,16 +456,18 @@ impl Drop for ChromascopeRadiantEditor {
 impl toybox::radiant_gui::RadiantEditor for ChromascopeRadiantEditor {
     fn resize(&mut self, width: u32, height: u32) {
         self.size = Vector2::new(width.max(1) as f32, height.max(1) as f32);
+        self.source_scrollbar_drag = None;
     }
 
     fn dispatch_event(&mut self, event: Event) {
         match event {
             Event::Resize { viewport } => {
                 self.size = Vector2::new(viewport.x.max(1.0), viewport.y.max(1.0));
-                self.source_scroll_offset = clamp_source_scroll(
-                    editor_layout(self.size).sources,
+                self.source_scrollbar_drag = None;
+                let layout = editor_layout(self.size);
+                self.sync_source_scroll_state(
+                    layout.sources,
                     crate::registry::snapshot_companions().len(),
-                    self.source_scroll_offset,
                 );
             }
             Event::Scroll {
@@ -371,12 +477,22 @@ impl toybox::radiant_gui::RadiantEditor for ChromascopeRadiantEditor {
                 let list = source_list_rect(layout.sources);
                 if list.contains(position) {
                     let count = crate::registry::snapshot_companions().len();
-                    self.source_scroll_offset = clamp_source_scroll(
-                        layout.sources,
-                        count,
-                        self.source_scroll_offset + delta.y,
-                    );
+                    self.source_scroll_offset += delta.y;
+                    self.sync_source_scroll_state(layout.sources, count);
                 }
+            }
+            Event::PointerMove { position } => {
+                if self.source_scrollbar_drag.is_some() {
+                    let layout = editor_layout(self.size);
+                    let companions = crate::registry::snapshot_companions();
+                    self.handle_source_scrollbar_move(layout.sources, companions.len(), position);
+                }
+            }
+            Event::PointerRelease {
+                button: PointerButton::Primary,
+                ..
+            } => {
+                self.source_scrollbar_drag = None;
             }
             Event::PointerPress {
                 position,
@@ -389,15 +505,10 @@ impl toybox::radiant_gui::RadiantEditor for ChromascopeRadiantEditor {
                 modifiers,
             } => {
                 let companions = crate::registry::snapshot_companions();
-                if let Some((id, active)) = self.companion_at(position, &companions) {
-                    if modifiers.command {
-                        if matches!(self.toggle_highlight(id, active), HighlightToggle::Added) {
-                            self.activate_companion(id, active);
-                        }
-                    } else {
-                        self.toggle_companion(id, active);
-                    }
-                }
+                self.handle_primary_source_event(position, modifiers, &companions);
+            }
+            Event::ClearFocus => {
+                self.source_scrollbar_drag = None;
             }
             _ => {}
         }
@@ -423,7 +534,7 @@ impl toybox::radiant_gui::RadiantEditor for ChromascopeRadiantEditor {
     }
 
     fn cancel_text_entry(&mut self) -> bool {
-        false
+        self.source_scrollbar_drag.take().is_some()
     }
 }
 
@@ -1058,25 +1169,62 @@ fn paint_source_scrollbar(
     companion_count: usize,
     scroll_offset: f32,
 ) {
+    let Some(geometry) = source_scrollbar_geometry(panel, companion_count, scroll_offset) else {
+        return;
+    };
+    push_fill(plan, SOURCE_WIDGET_ID, geometry.track, SCROLL_TRACK);
+    push_fill(plan, SOURCE_WIDGET_ID, geometry.thumb, SCROLL_THUMB);
+}
+
+fn source_scrollbar_geometry(
+    panel: Rect,
+    companion_count: usize,
+    scroll_offset: f32,
+) -> Option<SourceScrollbarGeometry> {
     let list = source_list_rect(panel);
     let content_height = source_content_height(companion_count);
     if content_height <= list.height() {
-        return;
+        return None;
     }
-    let track = Rect::from_xy_size(list.max.x - 5.0, list.min.y, 3.0, list.height());
-    let thumb_height = (list.height() * list.height() / content_height)
-        .max(18.0)
-        .min(list.height());
-    let scroll_span = (list.height() - thumb_height).max(0.0);
-    let thumb_y = list.min.y
-        + scroll_span * (scroll_offset / max_source_scroll(panel, companion_count).max(1.0));
-    push_fill(plan, SOURCE_WIDGET_ID, track, SCROLL_TRACK);
-    push_fill(
-        plan,
-        SOURCE_WIDGET_ID,
-        Rect::from_xy_size(track.min.x, thumb_y, track.width(), thumb_height),
-        SCROLL_THUMB,
+
+    let max_scroll = max_source_scroll(panel, companion_count);
+    let scroll_offset = clamp_source_scroll(panel, companion_count, scroll_offset);
+    let track = Rect::from_xy_size(
+        list.max.x - 5.0,
+        list.min.y,
+        SOURCE_SCROLLBAR_TRACK_WIDTH,
+        list.height(),
     );
+    let hit_strip_min_x = (list.max.x - SOURCE_SCROLLBAR_HIT_WIDTH).max(list.min.x);
+    let hit_strip = Rect::from_xy_size(
+        hit_strip_min_x,
+        list.min.y,
+        (list.max.x - hit_strip_min_x).max(1.0),
+        list.height(),
+    );
+    let thumb_height = (list.height() * list.height() / content_height)
+        .max(SOURCE_SCROLLBAR_THUMB_MIN_HEIGHT)
+        .min(list.height());
+    let scroll_span = (track.height() - thumb_height).max(0.0);
+    let thumb_y =
+        track.min.y + scroll_span * (scroll_offset / max_scroll.max(SOURCE_SCROLL_EPSILON));
+    let thumb = Rect::from_xy_size(track.min.x, thumb_y, track.width(), thumb_height);
+
+    Some(SourceScrollbarGeometry {
+        hit_strip,
+        track,
+        thumb,
+        max_scroll,
+        scroll_span,
+    })
+}
+
+fn source_scroll_from_thumb_top(geometry: SourceScrollbarGeometry, thumb_top: f32) -> f32 {
+    if geometry.scroll_span <= SOURCE_SCROLL_EPSILON {
+        return 0.0;
+    }
+    let fraction = ((thumb_top - geometry.track.min.y) / geometry.scroll_span).clamp(0.0, 1.0);
+    (fraction * geometry.max_scroll).clamp(0.0, geometry.max_scroll)
 }
 
 fn trace_points(frame: &SpectrumFrame, plot: Rect) -> Vec<Point> {
@@ -1483,6 +1631,228 @@ mod tests {
         assert_eq!(editor.selected_ids, vec![11, 12]);
         editor.toggle_companion(11, true);
         assert_eq!(editor.selected_ids, vec![12]);
+    }
+
+    fn overflowing_sources() -> Vec<CompanionSourceSnapshot> {
+        (0..MAX_COMPANIONS)
+            .map(|index| source(index as u64 + 40_000, true, None))
+            .collect()
+    }
+
+    #[test]
+    fn source_scrollbar_hit_strip_precedes_primary_and_command_double_clicks() {
+        let layout = editor_layout(Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32));
+        let companions = overflowing_sources();
+        let geometry = source_scrollbar_geometry(layout.sources, companions.len(), 0.0)
+            .expect("overflow should paint a scrollbar");
+        let position = Point::new(geometry.hit_strip.center().x, geometry.track.center().y);
+        let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+
+        assert_eq!(geometry.hit_strip.width(), SOURCE_SCROLLBAR_HIT_WIDTH);
+        assert_eq!(geometry.track.width(), SOURCE_SCROLLBAR_TRACK_WIDTH);
+        assert_eq!(editor.companion_at(position, &companions), None);
+
+        let command = PointerModifiers {
+            command: true,
+            ..PointerModifiers::default()
+        };
+        editor.handle_primary_source_event(position, command, &companions);
+        assert!(editor.selected_ids.is_empty());
+        assert!(editor.highlighted.is_empty());
+
+        let double_click_position = Point::new(
+            geometry.hit_strip.center().x,
+            geometry.track.max.y - geometry.thumb.height() * 0.5,
+        );
+        editor.handle_primary_source_event(double_click_position, command, &companions);
+        assert!(editor.selected_ids.is_empty());
+        assert!(editor.highlighted.is_empty());
+    }
+
+    #[test]
+    fn source_scrollbar_track_click_jumps_once_without_selecting_a_source() {
+        let layout = editor_layout(Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32));
+        let companions = overflowing_sources();
+        let initial_offset = max_source_scroll(layout.sources, companions.len()) * 0.75;
+        let geometry =
+            source_scrollbar_geometry(layout.sources, companions.len(), initial_offset).unwrap();
+        let position = Point::new(geometry.hit_strip.center().x, geometry.track.max.y - 1.0);
+        let expected =
+            source_scroll_from_thumb_top(geometry, position.y - geometry.thumb.height() * 0.5);
+        let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+        editor.source_scroll_offset = initial_offset;
+
+        editor.handle_primary_source_event(position, PointerModifiers::default(), &companions);
+
+        assert!((editor.source_scroll_offset - expected).abs() < 0.001);
+        assert!(editor.source_scrollbar_drag.is_none());
+        assert!(editor.selected_ids.is_empty());
+    }
+
+    #[test]
+    fn source_scrollbar_thumb_drag_preserves_grip_and_clamps_full_range() {
+        let layout = editor_layout(Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32));
+        let companions = overflowing_sources();
+        let initial_offset = max_source_scroll(layout.sources, companions.len()) * 0.25;
+        let geometry =
+            source_scrollbar_geometry(layout.sources, companions.len(), initial_offset).unwrap();
+        let grip_position = Point::new(
+            geometry.hit_strip.center().x,
+            geometry.thumb.min.y + geometry.thumb.height() * 0.25,
+        );
+        let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+        editor.source_scroll_offset = initial_offset;
+
+        assert!(editor.handle_source_scrollbar_press(
+            layout.sources,
+            companions.len(),
+            grip_position,
+        ));
+        let grip_fraction = match editor.source_scrollbar_drag {
+            Some(SourceScrollbarDrag::Thumb { grip_fraction }) => grip_fraction,
+            None => panic!("thumb press should capture the drag grip"),
+        };
+        assert!((grip_fraction - 0.25).abs() < 0.001);
+
+        let target_fraction = 0.4;
+        let target_top = geometry.track.min.y + geometry.scroll_span * target_fraction;
+        let target_pointer = Point::new(
+            geometry.hit_strip.center().x,
+            target_top + geometry.thumb.height() * grip_fraction,
+        );
+        assert!(editor.handle_source_scrollbar_move(
+            layout.sources,
+            companions.len(),
+            target_pointer,
+        ));
+        assert!(
+            (editor.source_scroll_offset - geometry.max_scroll * target_fraction).abs() < 0.001
+        );
+        let moved_geometry = source_scrollbar_geometry(
+            layout.sources,
+            companions.len(),
+            editor.source_scroll_offset,
+        )
+        .unwrap();
+        assert!((moved_geometry.thumb.min.y - target_top).abs() < 0.001);
+
+        editor.handle_source_scrollbar_move(
+            layout.sources,
+            companions.len(),
+            Point::new(geometry.hit_strip.center().x, geometry.track.min.y - 100.0),
+        );
+        assert_eq!(editor.source_scroll_offset, 0.0);
+        editor.handle_source_scrollbar_move(
+            layout.sources,
+            companions.len(),
+            Point::new(geometry.hit_strip.center().x, geometry.track.max.y + 100.0),
+        );
+        assert_eq!(
+            editor.source_scroll_offset,
+            max_source_scroll(layout.sources, companions.len())
+        );
+    }
+
+    #[test]
+    fn source_scrollbar_capture_clears_on_release_cancel_clear_focus_and_resize() {
+        let layout = editor_layout(Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32));
+        let companions = overflowing_sources();
+        let geometry = source_scrollbar_geometry(layout.sources, companions.len(), 0.0).unwrap();
+        let position = geometry.thumb.center();
+        let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+
+        assert!(editor.handle_source_scrollbar_press(layout.sources, companions.len(), position));
+        editor.dispatch_event(Event::PointerRelease {
+            position: Point::new(-1.0, -1.0),
+            button: PointerButton::Primary,
+            modifiers: PointerModifiers::default(),
+        });
+        assert!(editor.source_scrollbar_drag.is_none());
+
+        assert!(editor.handle_source_scrollbar_press(layout.sources, companions.len(), position));
+        assert!(editor.cancel_text_entry());
+        assert!(editor.source_scrollbar_drag.is_none());
+
+        assert!(editor.handle_source_scrollbar_press(layout.sources, companions.len(), position));
+        editor.dispatch_event(Event::ClearFocus);
+        assert!(editor.source_scrollbar_drag.is_none());
+
+        assert!(editor.handle_source_scrollbar_press(layout.sources, companions.len(), position));
+        editor.dispatch_event(Event::Resize {
+            viewport: Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32),
+        });
+        assert!(editor.source_scrollbar_drag.is_none());
+
+        assert!(editor.handle_source_scrollbar_press(layout.sources, companions.len(), position));
+        editor.resize(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(editor.source_scrollbar_drag.is_none());
+    }
+
+    #[test]
+    fn source_scrollbar_does_not_move_after_primary_release_outside_the_strip() {
+        let layout = editor_layout(Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32));
+        let companions = overflowing_sources();
+        let geometry = source_scrollbar_geometry(layout.sources, companions.len(), 0.0).unwrap();
+        let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+
+        assert!(editor.handle_source_scrollbar_press(
+            layout.sources,
+            companions.len(),
+            geometry.thumb.center(),
+        ));
+        editor.dispatch_event(Event::PointerRelease {
+            position: Point::new(-100.0, -100.0),
+            button: PointerButton::Primary,
+            modifiers: PointerModifiers::default(),
+        });
+        let released_offset = editor.source_scroll_offset;
+
+        assert!(!editor.handle_source_scrollbar_move(
+            layout.sources,
+            companions.len(),
+            Point::new(geometry.hit_strip.center().x, geometry.track.max.y + 100.0),
+        ));
+        assert_eq!(editor.source_scroll_offset, released_offset);
+    }
+
+    #[test]
+    fn source_scrollbar_capture_clears_when_overflow_disappears() {
+        let layout = editor_layout(Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32));
+        let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+        editor.source_scroll_offset = 20.0;
+        editor.source_scrollbar_drag = Some(SourceScrollbarDrag::Thumb { grip_fraction: 0.5 });
+
+        editor.sync_source_scroll_state(layout.sources, 0);
+
+        assert_eq!(editor.source_scroll_offset, 0.0);
+        assert!(editor.source_scrollbar_drag.is_none());
+    }
+
+    #[test]
+    fn source_row_click_and_double_click_behavior_is_unchanged_away_from_hit_strip() {
+        let layout = editor_layout(Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32));
+        let companions = [source(11, true, None), source(12, true, None)];
+        let position = source_row_rect(layout.sources, 0, 0.0).center();
+        let mut editor = ChromascopeRadiantEditor::new(Arc::new(ChromascopeShared::new(
+            crate::shared::DeviceKind::Viewer,
+        )));
+
+        editor.handle_primary_source_event(position, PointerModifiers::default(), &companions);
+        assert_eq!(editor.selected_ids, vec![11]);
+        editor.handle_primary_source_event(position, PointerModifiers::default(), &companions);
+        assert!(editor.selected_ids.is_empty());
     }
 
     #[test]
