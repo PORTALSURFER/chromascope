@@ -1,0 +1,135 @@
+name: Chromascope Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        required: true
+        default: stable
+        type: choice
+        options: [stable, rc, nightly]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  PYTHONDONTWRITEBYTECODE: "1"
+  VST3_SDK_REPOSITORY: https://github.com/steinbergmedia/vst3sdk.git
+  VST3_SDK_REVISION: 58f8da7936800732561402d7936584ca4505de07
+
+concurrency:
+  group: chromascope-windows-release-${{ inputs.channel }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout exact main source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Capture checked-out source SHA
+        id: source_sha
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Compute publication version and build identity
+        id: metadata
+        env:
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
+          WORKFLOW_SEQUENCE: ${{ github.run_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(sed -n '/^\[package\]/,/^\[/ { s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p; }' Cargo.toml | head -n 1)"
+          test -n "${package_version}"
+          publication_version="$(PYTHONPATH=scripts python - "${package_version}" "${RELEASE_CHANNEL}" "${WORKFLOW_SEQUENCE}" <<'PY'
+          import sys
+          from release_helper import derive_publication_version
+
+          print(derive_publication_version(sys.argv[1], sys.argv[2], sys.argv[3]))
+          PY
+          )"
+          build_id="chromascope-v${publication_version}-windows-x86_64-${SOURCE_SHA:0:12}"
+          released_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "package_version=${package_version}"
+            echo "publication_version=${publication_version}"
+            echo "build_id=${build_id}"
+            echo "released_at=${released_at}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Checkout pinned VST3 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_dir_unix="${RUNNER_TEMP}/vst3sdk"
+          sdk_dir_windows="$(cygpath -w "${sdk_dir_unix}")"
+          git clone "${VST3_SDK_REPOSITORY}" "${sdk_dir_unix}"
+          git -C "${sdk_dir_unix}" fetch --depth 1 origin "${VST3_SDK_REVISION}"
+          git -C "${sdk_dir_unix}" checkout --detach "${VST3_SDK_REVISION}"
+          test "$(git -C "${sdk_dir_unix}" rev-parse HEAD)" = "${VST3_SDK_REVISION}"
+          test -d "${sdk_dir_unix}/pluginterfaces"
+          echo "VST3_SDK_DIR=${sdk_dir_windows}" >> "$GITHUB_ENV"
+
+      - name: Build x86_64 Windows VST3 bundle
+        env:
+          PACKAGE_VERSION: ${{ steps.metadata.outputs.package_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_binary="dist/Chromascope-v${PACKAGE_VERSION}.vst3/Contents/x86_64-win/Chromascope-v${PACKAGE_VERSION}.vst3"
+          rm -rf -- "dist/Chromascope-v${PACKAGE_VERSION}.vst3"
+          cargo build --locked --release --target x86_64-pc-windows-msvc --features vst3
+          test -f "${source_binary}"
+
+      - name: Package and validate unsigned Windows artifact
+        env:
+          BUILD_ID: ${{ steps.metadata.outputs.build_id }}
+          CHANNEL: ${{ inputs.channel }}
+          PACKAGE_VERSION: ${{ steps.metadata.outputs.package_version }}
+          PUBLICATION_VERSION: ${{ steps.metadata.outputs.publication_version }}
+          RELEASED_AT: ${{ steps.metadata.outputs.released_at }}
+          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_dir="dist/releases/${BUILD_ID}"
+          source_binary="dist/Chromascope-v${PACKAGE_VERSION}.vst3/Contents/x86_64-win/Chromascope-v${PACKAGE_VERSION}.vst3"
+          python scripts/windows_release_helper.py package \
+            --binary "${source_binary}" \
+            --output-dir "${output_dir}" \
+            --package-version "${PACKAGE_VERSION}" \
+            --publication-version "${PUBLICATION_VERSION}" \
+            --channel "${CHANNEL}" \
+            --build-id "${BUILD_ID}" \
+            --released-at "${RELEASED_AT}" \
+            --source-sha "${SOURCE_SHA}" \
+            --cargo-lock Cargo.lock \
+            --vst3-sdk-revision "${VST3_SDK_REVISION}"
+          python scripts/windows_release_helper.py validate \
+            --root "${output_dir}" \
+            --cargo-lock Cargo.lock \
+            --vst3-sdk-revision "${VST3_SDK_REVISION}"
+          test "$(find "${output_dir}" -maxdepth 1 -type f | wc -l)" -eq 2
+          test -f "${output_dir}/chromascope-v${PUBLICATION_VERSION}-windows-x86_64-unsigned.vst3.zip"
+          test -f "${output_dir}/windows-artifact-manifest.json"
+
+      - name: Upload unsigned Windows artifact for inspection
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: chromascope-${{ steps.metadata.outputs.publication_version }}-windows-x86_64-unsigned
+          path: dist/releases/${{ steps.metadata.outputs.build_id }}/*
+          if-no-files-found: error
+          retention-days: 3

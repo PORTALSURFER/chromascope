@@ -101,7 +101,13 @@ and published by the checked-in GitHub Actions workflows:
 - `.github/workflows/release-preflight.yml` builds an ad-hoc VST3 for review.
 - `.github/workflows/release.yml` builds the signed/notarized VST3 and, when
   requested, publishes its manifest through PortalSurfer.
+- `.github/workflows/windows-release.yml` builds an explicitly unsigned x86_64
+  Windows VST3 ZIP plus its schema-1 artifact manifest for inspection.
 - `.github/workflows/nightly.yml` keeps the nightly release path available.
+
+See [docs/WINDOWS_RELEASE.md](docs/WINDOWS_RELEASE.md) for the Windows bundle,
+manifest, and validation contract. The Windows lane does not publish binaries
+through a GitHub Release or PortalSurfer.
 
 The staged bootstrap CLI also consumes `site/landing-page.json` to render the
 PortalSurfer page and `site/product.json` to register the product. Plan mode is
