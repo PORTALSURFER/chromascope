@@ -17,6 +17,9 @@ vst3 = ["toybox/radiant-vst3", "dep:radiant"]
 screenshot-test = ["toybox/screenshot-test"]
 
 [dependencies]
-toybox = { git = "https://github.com/PORTALSURFER/toybox.git", rev = "1c40aeee6062b3bcebc2799fa2ab65cf36d160a2", features = ["gui"] }
-radiant = { git = "https://github.com/PORTALSURFER/radiant.git", rev = "b21a4caa094294b3eb2b2b87f6c6bc08ced8b137", default-features = false, optional = true }
+toybox = { git = "https://github.com/PORTALSURFER/toybox.git", rev = "6d80e94bfedcebadc2767c3037f3973914ab5398", features = ["gui"] }
+radiant = { git = "https://github.com/PORTALSURFER/radiant.git", rev = "c1343993c973bdece3e8cd469415b0d08c7f6cf1", default-features = false, optional = true }
 rustfft = "6.2.0"
+
+[build-dependencies]
+toybox = { git = "https://github.com/PORTALSURFER/toybox.git", rev = "6d80e94bfedcebadc2767c3037f3973914ab5398", default-features = false }
