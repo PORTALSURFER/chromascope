@@ -11,7 +11,9 @@ use toybox::vst3::prelude::*;
 use crate::constants::{Rgb, WINDOW_HEIGHT, WINDOW_WIDTH};
 #[cfg(target_os = "macos")]
 use crate::gui::preferred_window_size;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+use crate::gui::preferred_window_size;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use crate::gui::{ChromascopeGui, preferred_window_size};
 use crate::instance_registry::{SharedRole, release_shared_for_role};
 use crate::shared::{ChromascopeShared, DeviceKind};
@@ -213,26 +215,26 @@ fn decode_channel_color(color: int64) -> Rgb {
     Rgb::new((color >> 16) as u8, (color >> 8) as u8, color as u8)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 struct ChromascopeVst3GuiAdapter {
     gui: toybox::radiant_gui::RadiantHostedGui,
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 struct ChromascopeVst3GuiAdapter {
     shared: Arc<ChromascopeShared>,
     gui: ChromascopeGui,
 }
 
 impl ChromascopeVst3GuiAdapter {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn new(shared: Arc<ChromascopeShared>) -> Self {
         Self {
             gui: crate::radiant_editor::new_gui(shared),
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     fn new(shared: Arc<ChromascopeShared>) -> Self {
         Self {
             shared,
@@ -243,16 +245,16 @@ impl ChromascopeVst3GuiAdapter {
 
 impl Vst3HostedGui for ChromascopeVst3GuiAdapter {
     fn set_parent_raw(&mut self, parent: toybox::raw_window_handle::RawWindowHandle) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.gui.set_parent(parent);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         self.gui.set_parent_raw(parent);
     }
 
     fn open(&mut self) -> bool {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         return self.gui.open();
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         self.gui.open(self.shared.clone()).is_ok()
     }
 

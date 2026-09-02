@@ -21,10 +21,10 @@ pub mod registry;
 pub mod render;
 mod visual_system;
 
-#[cfg(all(feature = "vst3", target_os = "macos"))]
+#[cfg(all(feature = "vst3", any(target_os = "macos", target_os = "windows")))]
 mod presentation;
 
-#[cfg(all(feature = "vst3", target_os = "macos"))]
+#[cfg(all(feature = "vst3", any(target_os = "macos", target_os = "windows")))]
 mod radiant_editor;
 
 #[cfg(feature = "vst3")]

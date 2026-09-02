@@ -1,9 +1,9 @@
-//! Radiant-backed macOS VST3 editor for the Chromascope viewer.
+//! Radiant-backed native VST3 editor for the Chromascope viewer.
 //!
 //! The legacy Toybox Patchbay host is intentionally retained for the portable
 //! declarative preview, but its native host window only accepts Win32 parents
 //! in this Toybox revision. macOS hosts provide an AppKit `NSView`; this editor
-//! uses Toybox's Radiant VST3 bridge for that native path.
+//! uses Toybox's Radiant VST3 bridge for that native path on macOS and Windows.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -156,7 +156,7 @@ struct EditorLayout {
     plot: Rect,
 }
 
-/// Construct the Toybox Radiant host facade used by the macOS VST3 controller.
+/// Construct the Toybox Radiant host facade used by the native VST3 controller.
 pub(crate) fn new_gui(shared: Arc<ChromascopeShared>) -> toybox::radiant_gui::RadiantHostedGui {
     toybox::radiant_gui::RadiantHostedGui::new(
         "ChromascopeRadiantVst3Editor",
@@ -382,11 +382,13 @@ impl toybox::radiant_gui::RadiantEditor for ChromascopeRadiantEditor {
                 position,
                 button: PointerButton::Primary,
                 modifiers,
+                ..
             }
             | Event::PointerDoubleClick {
                 position,
                 button: PointerButton::Primary,
                 modifiers,
+                ..
             } => {
                 let companions = crate::registry::snapshot_companions();
                 if let Some((id, active)) = self.companion_at(position, &companions) {
@@ -1511,6 +1513,7 @@ mod tests {
                 command: true,
                 ..PointerModifiers::default()
             },
+            timestamp: None,
         });
         assert_eq!(editor.selected_ids, vec![id]);
         assert_eq!(editor.highlighted.len(), 1);
@@ -1523,6 +1526,7 @@ mod tests {
                 command: true,
                 ..PointerModifiers::default()
             },
+            timestamp: None,
         });
         assert_eq!(editor.selected_ids, vec![id]);
         assert!(editor.highlighted.is_empty());
@@ -1531,6 +1535,7 @@ mod tests {
             position,
             button: PointerButton::Primary,
             modifiers: PointerModifiers::default(),
+            timestamp: None,
         });
         assert!(editor.highlighted.is_empty());
         assert!(editor.selected_ids.is_empty());
@@ -1559,6 +1564,7 @@ mod tests {
             position,
             button: PointerButton::Primary,
             modifiers: PointerModifiers::default(),
+            timestamp: None,
         });
         assert_eq!(editor.selected_ids, vec![id]);
         assert!(handle.analysis_requested());
@@ -1567,6 +1573,7 @@ mod tests {
             position,
             button: PointerButton::Primary,
             modifiers: PointerModifiers::default(),
+            timestamp: None,
         });
         assert!(editor.selected_ids.is_empty());
         assert!(!handle.analysis_requested());
@@ -1603,16 +1610,19 @@ mod tests {
             position: active_position,
             button: PointerButton::Secondary,
             modifiers: PointerModifiers::default(),
+            timestamp: None,
         });
         editor.dispatch_event(Event::PointerDoubleClick {
             position: outside_row,
             button: PointerButton::Primary,
             modifiers: PointerModifiers::default(),
+            timestamp: None,
         });
         editor.dispatch_event(Event::PointerDoubleClick {
             position: inactive_position,
             button: PointerButton::Primary,
             modifiers: PointerModifiers::default(),
+            timestamp: None,
         });
 
         assert!(editor.selected_ids.is_empty());
@@ -1797,6 +1807,7 @@ mod tests {
         )));
         editor.dispatch_event(Event::PointerModifiersChanged {
             modifiers: PointerModifiers::default(),
+            timestamp: None,
         });
         assert!(editor.selected_ids.is_empty());
     }
