@@ -16,6 +16,9 @@ permissions:
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   PYTHONDONTWRITEBYTECODE: "1"
+  WINDOWS_RUNNER_IMAGE: windows-2022
+  RUST_TOOLCHAIN: 1.97.1
+  RUST_TARGET: x86_64-pc-windows-msvc
   VST3_SDK_REPOSITORY: https://github.com/steinbergmedia/vst3sdk.git
   VST3_SDK_REVISION: 58f8da7936800732561402d7936584ca4505de07
 
@@ -25,7 +28,9 @@ concurrency:
 
 jobs:
   release:
-    runs-on: windows-latest
+    # Pin the Windows Server generation; ImageOS/ImageVersion below identify
+    # the concrete hosted image used for each emitted manifest.
+    runs-on: windows-2022
     steps:
       - name: Checkout exact main source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -68,7 +73,36 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          target: x86_64-pc-windows-msvc
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          target: ${{ env.RUST_TARGET }}
+
+      - name: Capture build environment provenance
+        id: build_environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_image_os="${ImageOS:?GitHub runner ImageOS is unavailable}"
+          runner_image_version="${ImageVersion:?GitHub runner ImageVersion is unavailable}"
+          test "${runner_image_os}" = "win22"
+          [[ "${runner_image_version}" =~ ^[0-9]{8}\.[0-9]+\.[0-9]+$ ]]
+          rustc_version="$(rustc --version)"
+          rustc_release="$(printf '%s\n' "${rustc_version}" | sed -n 's/^rustc \([^ ]*\).*/\1/p')"
+          test "${rustc_release}" = "${RUST_TOOLCHAIN}"
+          rust_target="$(rustc -vV | sed -n 's/^host: //p')"
+          test "${rust_target}" = "${RUST_TARGET}"
+          python_implementation="$(python -c 'import platform; print(platform.python_implementation())')"
+          python_version="$(python -c 'import platform; print(platform.python_version())')"
+          test "${python_implementation}" = "CPython"
+          {
+            echo "runner_image=${WINDOWS_RUNNER_IMAGE}"
+            echo "runner_image_os=${runner_image_os}"
+            echo "runner_image_version=${runner_image_version}"
+            echo "rust_toolchain=${RUST_TOOLCHAIN}"
+            echo "rust_target=${RUST_TARGET}"
+            echo "rustc_version=${rustc_version}"
+            echo "python_implementation=${python_implementation}"
+            echo "python_version=${python_version}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout pinned VST3 SDK
         shell: bash
@@ -102,6 +136,14 @@ jobs:
           PUBLICATION_VERSION: ${{ steps.metadata.outputs.publication_version }}
           RELEASED_AT: ${{ steps.metadata.outputs.released_at }}
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
+          RUNNER_IMAGE: ${{ steps.build_environment.outputs.runner_image }}
+          RUNNER_IMAGE_OS: ${{ steps.build_environment.outputs.runner_image_os }}
+          RUNNER_IMAGE_VERSION: ${{ steps.build_environment.outputs.runner_image_version }}
+          BUILD_RUST_TOOLCHAIN: ${{ steps.build_environment.outputs.rust_toolchain }}
+          BUILD_RUST_TARGET: ${{ steps.build_environment.outputs.rust_target }}
+          BUILD_RUSTC_VERSION: ${{ steps.build_environment.outputs.rustc_version }}
+          BUILD_PYTHON_IMPLEMENTATION: ${{ steps.build_environment.outputs.python_implementation }}
+          BUILD_PYTHON_VERSION: ${{ steps.build_environment.outputs.python_version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -117,7 +159,15 @@ jobs:
             --released-at "${RELEASED_AT}" \
             --source-sha "${SOURCE_SHA}" \
             --cargo-lock Cargo.lock \
-            --vst3-sdk-revision "${VST3_SDK_REVISION}"
+            --vst3-sdk-revision "${VST3_SDK_REVISION}" \
+            --runner-image "${RUNNER_IMAGE}" \
+            --runner-image-os "${RUNNER_IMAGE_OS}" \
+            --runner-image-version "${RUNNER_IMAGE_VERSION}" \
+            --rust-toolchain "${BUILD_RUST_TOOLCHAIN}" \
+            --rust-target "${BUILD_RUST_TARGET}" \
+            --rustc-version "${BUILD_RUSTC_VERSION}" \
+            --python-implementation "${BUILD_PYTHON_IMPLEMENTATION}" \
+            --python-version "${BUILD_PYTHON_VERSION}"
           python scripts/windows_release_helper.py validate \
             --root "${output_dir}" \
             --cargo-lock Cargo.lock \

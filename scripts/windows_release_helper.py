@@ -54,10 +54,72 @@ IMAGE_FILE_MACHINE_AMD64 = 0x8664
 PE_DATA_DIRECTORY_OFFSET = 112
 IMAGE_DIRECTORY_ENTRY_SECURITY = 4
 WINDOWS_PATH_POLICY = "relative-no-traversal-no-symlinks"
+WINDOWS_RUNNER_IMAGE = "windows-2022"
+WINDOWS_RUNNER_OS = "win22"
+RUST_TOOLCHAIN = "1.97.1"
+RUST_TARGET = "x86_64-pc-windows-msvc"
+PYTHON_IMPLEMENTATION = "CPython"
 
 
 def _positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _validate_build_environment(build_environment: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    if not isinstance(build_environment, Mapping) or set(build_environment) != {"runner", "rust", "python"}:
+        raise ValueError("Windows build environment metadata is invalid")
+
+    runner = build_environment["runner"]
+    if not isinstance(runner, Mapping) or set(runner) != {"image", "image_os", "image_version"}:
+        raise ValueError("Windows runner provenance is invalid")
+    runner_image = runner["image"]
+    runner_image_os = runner["image_os"]
+    runner_image_version = runner["image_version"]
+    if runner_image != WINDOWS_RUNNER_IMAGE or runner_image_os != WINDOWS_RUNNER_OS:
+        raise ValueError("Windows runner provenance does not match the pinned image")
+    if not isinstance(runner_image_version, str) or re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", runner_image_version) is None:
+        raise ValueError("Windows runner image version is invalid")
+
+    rust = build_environment["rust"]
+    if not isinstance(rust, Mapping) or set(rust) != {"toolchain", "target", "rustc_version"}:
+        raise ValueError("Rust compiler provenance is invalid")
+    rust_toolchain = rust["toolchain"]
+    rust_target = rust["target"]
+    rustc_version = rust["rustc_version"]
+    if rust_toolchain != RUST_TOOLCHAIN or rust_target != RUST_TARGET:
+        raise ValueError("Rust compiler provenance does not match the pinned toolchain")
+    if (
+        not isinstance(rustc_version, str)
+        or re.fullmatch(rf"rustc {re.escape(RUST_TOOLCHAIN)} \([^()\r\n]+\)", rustc_version) is None
+    ):
+        raise ValueError("Rust compiler version is invalid")
+
+    python = build_environment["python"]
+    if not isinstance(python, Mapping) or set(python) != {"implementation", "version"}:
+        raise ValueError("Python provenance is invalid")
+    python_implementation = python["implementation"]
+    python_version = python["version"]
+    if python_implementation != PYTHON_IMPLEMENTATION:
+        raise ValueError("Python implementation is invalid")
+    if not isinstance(python_version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", python_version) is None:
+        raise ValueError("Python version is invalid")
+
+    return {
+        "runner": {
+            "image": runner_image,
+            "image_os": runner_image_os,
+            "image_version": runner_image_version,
+        },
+        "rust": {
+            "toolchain": rust_toolchain,
+            "target": rust_target,
+            "rustc_version": rustc_version,
+        },
+        "python": {
+            "implementation": python_implementation,
+            "version": python_version,
+        },
+    }
 
 
 def bundle_name(package_version: str) -> str:
@@ -346,6 +408,7 @@ def build_manifest(
     source_sha: str,
     archive: Path,
     dependencies: Mapping[str, Any],
+    build_environment: Mapping[str, Any],
 ) -> dict[str, Any]:
     _validate_identity(
         package_version=package_version,
@@ -355,6 +418,7 @@ def build_manifest(
         released_at=released_at,
         source_sha=source_sha,
     )
+    normalized_build_environment = _validate_build_environment(build_environment)
     normalized_dependencies = _validate_dependencies(dependencies)
     details = validate_archive(
         archive,
@@ -372,6 +436,7 @@ def build_manifest(
         "channel": channel,
         "build_id": build_id,
         "released_at": released_at,
+        "build_environment": normalized_build_environment,
         "source": {
             "repository": REPOSITORY,
             "git_sha": source_sha,
@@ -422,6 +487,7 @@ def validate_manifest(
         "channel",
         "build_id",
         "released_at",
+        "build_environment",
         "source",
         "dependencies",
         "signing_status",
@@ -451,6 +517,7 @@ def validate_manifest(
         released_at=manifest["released_at"],
         source_sha=source["git_sha"],
     )
+    _validate_build_environment(manifest["build_environment"])
     if manifest["signing_status"] != SIGNING_STATUS or manifest["signing_certificate"] is not None:
         raise ValueError("Windows artifact must explicitly be unsigned with no certificate")
     dependencies = _validate_dependencies(manifest["dependencies"])
@@ -518,6 +585,7 @@ def package_windows_vst3(
     released_at: str,
     source_sha: str,
     dependencies: Mapping[str, Any],
+    build_environment: Mapping[str, Any],
 ) -> dict[str, Any]:
     _validate_identity(
         package_version=package_version,
@@ -559,6 +627,7 @@ def package_windows_vst3(
             source_sha=source_sha,
             archive=staged_archive,
             dependencies=dependencies,
+            build_environment=build_environment,
         )
         staged_manifest = temporary_root / manifest_path.name
         staged_manifest.write_bytes(canonical_json(manifest))
@@ -580,6 +649,22 @@ def _package_command(args: argparse.Namespace) -> None:
         released_at=args.released_at,
         source_sha=args.source_sha,
         dependencies=dependencies,
+        build_environment={
+            "runner": {
+                "image": args.runner_image,
+                "image_os": args.runner_image_os,
+                "image_version": args.runner_image_version,
+            },
+            "rust": {
+                "toolchain": args.rust_toolchain,
+                "target": args.rust_target,
+                "rustc_version": args.rustc_version,
+            },
+            "python": {
+                "implementation": args.python_implementation,
+                "version": args.python_version,
+            },
+        },
     )
     print(canonical_json(manifest).decode("utf-8"), end="")
 
@@ -618,6 +703,14 @@ def _build_parser() -> argparse.ArgumentParser:
     package.add_argument("--source-sha", required=True)
     package.add_argument("--cargo-lock", required=True)
     package.add_argument("--vst3-sdk-revision", default=VST3_SDK_REVISION)
+    package.add_argument("--runner-image", required=True)
+    package.add_argument("--runner-image-os", required=True)
+    package.add_argument("--runner-image-version", required=True)
+    package.add_argument("--rust-toolchain", required=True)
+    package.add_argument("--rust-target", required=True)
+    package.add_argument("--rustc-version", required=True)
+    package.add_argument("--python-implementation", required=True)
+    package.add_argument("--python-version", required=True)
     package.set_defaults(handler=_package_command)
 
     validate = subparsers.add_parser("validate", help="validate an emitted Windows VST3 manifest and archive")
