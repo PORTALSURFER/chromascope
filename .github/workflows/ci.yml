@@ -12,6 +12,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Test release helpers
+        shell: bash
+        run: python3 -m unittest discover -s tests -p '*_test.py'
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
