@@ -21,6 +21,28 @@ SOURCE_SHA = "a" * 40
 TOYBOX_REVISION = "b" * 40
 RADIANT_REVISION = "c" * 40
 SDK_REVISION = "d" * 40
+RUNNER_IMAGE_VERSION = "20260901.1.0"
+RUSTC_VERSION = "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+PYTHON_VERSION = "3.13.7"
+
+
+def build_environment() -> dict:
+    return {
+        "runner": {
+            "image": "windows-2022",
+            "image_os": "win22",
+            "image_version": RUNNER_IMAGE_VERSION,
+        },
+        "rust": {
+            "toolchain": "1.97.1",
+            "target": "x86_64-pc-windows-msvc",
+            "rustc_version": RUSTC_VERSION,
+        },
+        "python": {
+            "implementation": "CPython",
+            "version": PYTHON_VERSION,
+        },
+    }
 
 
 def pe_image(
@@ -76,6 +98,7 @@ class WindowsReleaseHelperTests(unittest.TestCase):
             released_at="2026-09-02T10:20:30Z",
             source_sha=SOURCE_SHA,
             dependencies=dependencies,
+            build_environment=build_environment(),
         )
         return manifest, output, lockfile
 
@@ -93,6 +116,7 @@ class WindowsReleaseHelperTests(unittest.TestCase):
             self.assertEqual(manifest["dependencies"]["toybox"]["revision"], TOYBOX_REVISION)
             self.assertEqual(manifest["dependencies"]["radiant"]["revision"], RADIANT_REVISION)
             self.assertEqual(manifest["dependencies"]["vst3sdk"]["revision"], SDK_REVISION)
+            self.assertEqual(manifest["build_environment"], build_environment())
             self.assertEqual(
                 manifest["archive"]["layout"],
                 {
@@ -153,6 +177,7 @@ class WindowsReleaseHelperTests(unittest.TestCase):
                     released_at="2026-09-02T10:20:30Z",
                     source_sha=SOURCE_SHA,
                     dependencies=windows_release_helper.dependency_revisions(lockfile, vst3_sdk_revision=SDK_REVISION),
+                    build_environment=build_environment(),
                 )
 
     def test_archive_rejects_path_traversal_and_extra_members(self) -> None:
@@ -191,6 +216,16 @@ class WindowsReleaseHelperTests(unittest.TestCase):
                     vst3_sdk_revision=SDK_REVISION,
                 )
 
+            manifest, output, lockfile = self.package(Path(directory), output_name="environment-tamper")
+            manifest["build_environment"]["rust"]["toolchain"] = "stable"
+            with self.assertRaisesRegex(ValueError, "Rust compiler provenance"):
+                windows_release_helper.validate_manifest(
+                    manifest,
+                    output,
+                    cargo_lock=lockfile,
+                    vst3_sdk_revision=SDK_REVISION,
+                )
+
             manifest, output, lockfile = self.package(Path(directory), output_name="signed-tamper")
             manifest["signing_status"] = "signed"
             with self.assertRaisesRegex(ValueError, "unsigned"):
@@ -212,6 +247,22 @@ class WindowsReleaseHelperTests(unittest.TestCase):
                     package_version="0.1.0",
                     publication_version="0.1.0-nightly.7",
                 )
+
+    def test_windows_workflow_pins_and_forwards_build_provenance(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
+        self.assertIn("runs-on: windows-2022", workflow)
+        self.assertNotIn("runs-on: windows-latest", workflow)
+        self.assertIn("toolchain: ${{ env.RUST_TOOLCHAIN }}", workflow)
+        self.assertIn("RUST_TOOLCHAIN: 1.97.1", workflow)
+        self.assertIn("RUST_TARGET: x86_64-pc-windows-msvc", workflow)
+        for argument in (
+            "--runner-image-version",
+            "--rust-toolchain",
+            "--rustc-version",
+            "--python-implementation",
+            "--python-version",
+        ):
+            self.assertIn(argument, workflow)
 
 
 if __name__ == "__main__":
