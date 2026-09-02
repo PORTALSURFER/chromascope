@@ -11,7 +11,7 @@ use crate::analysis::SpectrumAnalyzer;
 use crate::instance_registry::{SharedRole, release_shared_for_role};
 use crate::shared::{ChromascopeShared, DeviceKind};
 
-use super::{COMPANION_CONTROLLER_CID, VIEWER_CONTROLLER_CID, vst3_bus_flag};
+use super::{COMPANION_CONTROLLER_CID, VIEWER_CONTROLLER_CID, vst3_bus_flag as vst3_flag};
 
 /// One stereo processor paired with a shared viewer or companion runtime.
 pub(super) struct ChromascopeVst3Processor {
@@ -140,7 +140,7 @@ impl IComponentTrait for ChromascopeVst3Processor {
         bus.channelCount = 2;
         copy_wstring(label, &mut bus.name);
         bus.busType = BusTypes_::kMain as BusType;
-        bus.flags = vst3_bus_flag(BusInfo_::BusFlags_::kDefaultActive);
+        bus.flags = vst3_flag(BusInfo_::BusFlags_::kDefaultActive);
         kResultOk
     }
 
@@ -329,7 +329,7 @@ impl IAudioProcessorTrait for ChromascopeVst3Processor {
 
 impl IProcessContextRequirementsTrait for ChromascopeVst3Processor {
     unsafe fn getProcessContextRequirements(&self) -> u32 {
-        IProcessContextRequirements_::Flags_::kNeedContinousTimeSamples
+        vst3_flag(IProcessContextRequirements_::Flags_::kNeedContinousTimeSamples)
     }
 }
 
@@ -341,7 +341,7 @@ impl IProcessContextRequirementsTrait for ChromascopeVst3Processor {
 /// A missing process context is explicitly untimed.
 fn process_context_sample_position(data: &ProcessData) -> Option<i64> {
     let context = unsafe { data.processContext.as_ref() }?;
-    if context.state & ProcessContext_::StatesAndFlags_::kContTimeValid != 0 {
+    if context.state & vst3_flag(ProcessContext_::StatesAndFlags_::kContTimeValid) != 0 {
         Some(context.continousTimeSamples)
     } else {
         Some(context.projectTimeSamples)
@@ -389,7 +389,7 @@ mod tests {
                 )
                 .getProcessContextRequirements()
             },
-            IProcessContextRequirements_::Flags_::kNeedContinousTimeSamples
+            vst3_flag(IProcessContextRequirements_::Flags_::kNeedContinousTimeSamples)
         );
     }
 
@@ -405,7 +405,7 @@ mod tests {
         let mut continuous_context: ProcessContext = unsafe { std::mem::zeroed() };
         continuous_context.projectTimeSamples = 1_000;
         continuous_context.continousTimeSamples = 2_000;
-        continuous_context.state = ProcessContext_::StatesAndFlags_::kContTimeValid;
+        continuous_context.state = vst3_flag(ProcessContext_::StatesAndFlags_::kContTimeValid);
         let mut continuous_data: ProcessData = unsafe { std::mem::zeroed() };
         continuous_data.processContext = &mut continuous_context;
         assert_eq!(

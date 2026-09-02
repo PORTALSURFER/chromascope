@@ -62,7 +62,7 @@ pub(crate) const PUMP_PALETTE: PumpAlignedPalette = PumpAlignedPalette {
 };
 
 /// Geometry shared with Pump's compact editor language.
-#[cfg(all(feature = "vst3", target_os = "macos"))]
+#[cfg(all(feature = "vst3", any(target_os = "macos", target_os = "windows")))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PumpAlignedMetrics {
     /// Base spacing unit.
@@ -90,7 +90,7 @@ pub(crate) struct PumpAlignedMetrics {
 }
 
 /// Exact Pump geometry roles used by Chromascope's native composition.
-#[cfg(all(feature = "vst3", target_os = "macos"))]
+#[cfg(all(feature = "vst3", any(target_os = "macos", target_os = "windows")))]
 pub(crate) const PUMP_ALIGNED_METRICS: PumpAlignedMetrics = PumpAlignedMetrics {
     base: 3.4,
     space_4: 3.4,
@@ -106,7 +106,7 @@ pub(crate) const PUMP_ALIGNED_METRICS: PumpAlignedMetrics = PumpAlignedMetrics {
 };
 
 /// Pump's typography roles in logical pixels.
-#[cfg(all(feature = "vst3", target_os = "macos"))]
+#[cfg(all(feature = "vst3", any(target_os = "macos", target_os = "windows")))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PumpAlignedTypography {
     /// Brand/title size and line height.
@@ -122,7 +122,7 @@ pub(crate) struct PumpAlignedTypography {
 }
 
 /// Exact Pump typography roles used by Chromascope's native composition.
-#[cfg(all(feature = "vst3", target_os = "macos"))]
+#[cfg(all(feature = "vst3", any(target_os = "macos", target_os = "windows")))]
 pub(crate) const PUMP_ALIGNED_TYPOGRAPHY: PumpAlignedTypography = PumpAlignedTypography {
     brand: (18.7, 23.8),
     body: (11.9, 15.3),
@@ -183,7 +183,7 @@ mod tests {
         assert_eq!(PUMP_PALETTE.text_primary, Rgb::new(216, 215, 211));
     }
 
-    #[cfg(all(feature = "vst3", target_os = "macos"))]
+    #[cfg(all(feature = "vst3", any(target_os = "macos", target_os = "windows")))]
     #[test]
     fn metrics_and_typography_match_pumps_compact_roles() {
         assert_eq!(PUMP_ALIGNED_METRICS.base, 3.4);
