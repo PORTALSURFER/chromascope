@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import struct
 import sys
 import tempfile
@@ -250,6 +251,76 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertIn("--publisher-script", script)
         self.assertIn('node "${publisher_script}"', script)
         self.assertNotIn("--token", script)
+
+    def test_release_preflight_executes_pr_safe_combined_nightly_chain(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "release-preflight.yml").read_text(encoding="utf-8")
+        production_workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        harness = (ROOT / "tests" / "release_pipeline_integration.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("pull_request_target", workflow)
+        self.assertNotIn("secrets", workflow)
+        self.assertNotIn("environment: production", workflow)
+        self.assertNotIn("contents: write", workflow)
+        self.assertNotIn("id-token: write", workflow)
+        for action in re.findall(r"(?m)^\s+uses:\s+([^\s#]+)", workflow):
+            if not action.startswith("./"):
+                self.assertRegex(action, r"@[0-9a-f]{40}\Z", action)
+
+        self.assertIn("github.event.pull_request.head.sha", workflow)
+        self.assertIn("github.run_attempt", workflow)
+        self.assertIn("attempt_suffix", workflow)
+
+        windows_lane = workflow.split("\n  windows_integration:\n", 1)[1].split("\n  integration:\n", 1)[0]
+        integration_lane = workflow.split("\n  integration:\n", 1)[1]
+        self.assertIn("uses: ./.github/workflows/windows-release.yml", windows_lane)
+        self.assertIn("permissions:\n      contents: read", windows_lane)
+        self.assertNotRegex(windows_lane, r"(?m)^\s*(?:environment|secrets):")
+        for field in ("source_sha", "package_version", "publication_version", "build_id", "released_at"):
+            self.assertIn(f"      {field}: ${{{{ needs.prepare.outputs.{field} }}}}", windows_lane)
+        self.assertIn("      channel: nightly", windows_lane)
+
+        self.assertIn("needs: [prepare, preflight, windows_integration]", integration_lane)
+        self.assertNotRegex(integration_lane, r"(?m)^\s*secrets(?:\.|:)")
+        self.assertNotRegex(integration_lane, r"(?m)^\s*environment:")
+        self.assertNotRegex(integration_lane, r"(?m)^\s*(?:contents|actions|id-token):\s*write\b")
+        self.assertEqual(integration_lane.count("actions/download-artifact@"), 2)
+        self.assertIn(
+            "name: chromascope-macos-preflight-${{ needs.prepare.outputs.build_id }}-${{ needs.prepare.outputs.attempt_suffix }}",
+            integration_lane,
+        )
+        self.assertIn("name: chromascope-windows-${{ needs.prepare.outputs.build_id }}", integration_lane)
+        for forbidden in ("token:", "repository:", "run-id:", "pattern:", "merge-multiple:"):
+            self.assertNotIn(forbidden, integration_lane)
+        self.assertIn("tests/release_pipeline_integration.py", workflow)
+
+        def publisher_pin(text: str) -> str:
+            match = re.search(r"(?m)^\s*PUBLISHER_COMMIT:\s*([0-9a-f]{40})\s*$", text)
+            self.assertIsNotNone(match)
+            return match.group(1)  # type: ignore[union-attr]
+
+        self.assertEqual(publisher_pin(workflow), publisher_pin(production_workflow))
+        self.assertEqual(publisher_pin(workflow), "165776d6707ab6d9e8bb76b2a8866654140ca6bc")
+        for argument in (
+            "--macos-artifact-root",
+            "--windows-artifact-root",
+            "--publisher-script",
+            "--package-version",
+            "--publication-version",
+            "--build-id",
+            "--source-sha",
+            "--released-at",
+        ):
+            self.assertIn(argument, harness)
+        for contract in (
+            "windows_release_helper.validate_manifest(",
+            "release_helper.build_manifest(",
+            "release_helper.canonical_json(",
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            '"127.0.0.1"',
+            "TEST_ATTESTATION_TOKEN",
+            "api_mock.commit_count == 1",
+        ):
+            self.assertIn(contract, harness)
 
     def test_release_script_captures_and_passes_valid_team_id(self) -> None:
         script = (ROOT / "scripts" / "release.sh").read_text(encoding="utf-8")
