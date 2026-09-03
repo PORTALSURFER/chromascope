@@ -99,15 +99,22 @@ This folder is an independently bootstrapped AudioDev repository. The local
 and published by the checked-in GitHub Actions workflows:
 
 - `.github/workflows/release-preflight.yml` builds an ad-hoc VST3 for review.
-- `.github/workflows/release.yml` builds the signed/notarized VST3 and, when
-  requested, publishes its manifest through PortalSurfer.
-- `.github/workflows/windows-release.yml` builds an explicitly unsigned x86_64
-  Windows VST3 ZIP plus its schema-1 artifact manifest for inspection.
+- `.github/workflows/release.yml` prepares one shared source/version/timestamp
+  identity, builds the signed/notarized macOS arm64 VST3, and for nightlies
+  combines it with the explicitly unsigned Windows x86_64 VST3 in one
+  PortalSurfer schema-3 release. Stable and RC releases remain schema-2 and
+  macOS-only.
+- `.github/workflows/windows-release.yml` retains standalone Windows inspection
+  dispatches, and is also called by the nightly workflow to produce the
+  validated archive plus schema-1 sidecar consumed by the final macOS job.
 - `.github/workflows/nightly.yml` keeps the nightly release path available.
 
 See [docs/WINDOWS_RELEASE.md](docs/WINDOWS_RELEASE.md) for the Windows bundle,
-manifest, and validation contract. The Windows lane does not publish binaries
-through a GitHub Release or PortalSurfer.
+manifest, and validation contract. Standalone Windows dispatches do not publish
+binaries through a GitHub Release or PortalSurfer; a called nightly publishes
+both platform archives together through the one PortalSurfer release. Schema-3
+publishing uses the final job's short-lived GitHub OIDC attestation and adds no
+new long-lived secret.
 
 The staged bootstrap CLI also consumes `site/landing-page.json` to render the
 PortalSurfer page and `site/product.json` to register the product. Plan mode is

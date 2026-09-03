@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manifest-v2 and PortalSurfer transport helpers for a VST3-only plug-in."""
+"""Manifest-v2/v3 and PortalSurfer transport helpers for a VST3-only plug-in."""
 
 from __future__ import annotations
 
@@ -16,8 +16,15 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 MANIFEST_SCHEMA = 2
-MANIFEST_CONTENT_TYPE = "application/vnd.portalsurfer.release-manifest+json;version=2"
+MANIFEST_SCHEMA_V2 = 2
+MANIFEST_SCHEMA_V3 = 3
+MANIFEST_CONTENT_TYPES = {
+    MANIFEST_SCHEMA_V2: "application/vnd.portalsurfer.release-manifest+json;version=2",
+    MANIFEST_SCHEMA_V3: "application/vnd.portalsurfer.release-manifest+json;version=3",
+}
+MANIFEST_CONTENT_TYPE = MANIFEST_CONTENT_TYPES[MANIFEST_SCHEMA]
 PRODUCTION_ORIGIN = "https://portalsurfer.org"
+CHROMASCOPE_TEAM_ID = "DKTKQ8U5T8"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SAFE_BUILD_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{1,127}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -153,7 +160,7 @@ def _validate_common(product: str, repository: str, version: str, build_id: str,
         raise ValueError("released_at must include a timezone")
 
 
-def build_manifest(
+def _build_schema2_manifest(
     *,
     product: str,
     repository: str,
@@ -254,7 +261,202 @@ def build_manifest(
     }
 
 
-def validate_manifest(manifest: dict[str, Any], root: Path) -> None:
+def build_manifest(
+    *,
+    product: str,
+    repository: str,
+    version: str,
+    build_id: str,
+    channel: str,
+    released_at: str,
+    git_sha: str,
+    vst3: Path,
+    screenshot: Path,
+    changelog: Path,
+    distribution: str = "production",
+    signing_team_id: str = "",
+    vst3_notary_id: str = "",
+    windows_vst3: Optional[Path] = None,
+) -> dict[str, Any]:
+    _validate_common(product, repository, version, build_id, channel, released_at, git_sha)
+    if distribution not in {"production", "preflight"}:
+        raise ValueError("invalid distribution")
+    if windows_vst3 is None:
+        if product == "chromascope" and channel == "nightly" and distribution == "production":
+            raise ValueError("production Chromascope nightly requires the Windows artifact")
+        return _build_schema2_manifest(
+            product=product,
+            repository=repository,
+            version=version,
+            build_id=build_id,
+            channel=channel,
+            released_at=released_at,
+            git_sha=git_sha,
+            vst3=vst3,
+            screenshot=screenshot,
+            changelog=changelog,
+            distribution=distribution,
+            signing_team_id=signing_team_id,
+            vst3_notary_id=vst3_notary_id,
+        )
+    if product != "chromascope" or channel != "nightly" or distribution != "production":
+        raise ValueError("schema 3 is only available for production Chromascope nightlies")
+    return _build_schema3_manifest(
+        product=product,
+        repository=repository,
+        version=version,
+        build_id=build_id,
+        channel=channel,
+        released_at=released_at,
+        git_sha=git_sha,
+        vst3=vst3,
+        screenshot=screenshot,
+        changelog=changelog,
+        signing_team_id=signing_team_id,
+        vst3_notary_id=vst3_notary_id,
+        windows_vst3=windows_vst3,
+    )
+
+
+def _validate_regular_file(path: Path, label: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{label} must be a regular file: {path.name}")
+
+
+def _validated_file_digest(path: Path, label: str) -> tuple[str, int]:
+    _validate_regular_file(path, label)
+    digest, size = file_digest(path)
+    if size <= 0 or not SHA256.fullmatch(digest):
+        raise ValueError(f"{label} is empty or has an invalid hash")
+    return digest, size
+
+
+def _schema3_asset_metadata(
+    *, product: str, git_sha: str, screenshot: Path, changelog: Path
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if screenshot.name != f"{product}-default-{screenshot.name.rsplit('-', 1)[-1]}":
+        raise ValueError("screenshot name is not bound to the product")
+    if not SCREENSHOT_NAME.fullmatch(screenshot.name):
+        raise ValueError("screenshot name is invalid")
+    _validate_regular_file(screenshot, "screenshot")
+    width, height, screenshot_hash, screenshot_size = validate_png(screenshot)
+    if not screenshot.name.endswith(f"{width}x{height}.png"):
+        raise ValueError("screenshot name dimensions do not match PNG dimensions")
+    if changelog.name != "CHANGELOG.md":
+        raise ValueError("CHANGELOG.md is missing or invalid")
+    changelog_hash, changelog_size = _validated_file_digest(changelog, "CHANGELOG.md")
+    return (
+        {
+            "role": "default-ui",
+            "name": screenshot.name,
+            "media_type": "image/png",
+            "width": width,
+            "height": height,
+            "logical_width": width,
+            "logical_height": height,
+            "dpi_scale": 1.0,
+            "source_git_sha": git_sha,
+            "sha256": screenshot_hash,
+            "size_bytes": screenshot_size,
+        },
+        {
+            "name": "CHANGELOG.md",
+            "format": "markdown",
+            "media_type": "text/markdown; charset=utf-8",
+            "sha256": changelog_hash,
+            "size_bytes": changelog_size,
+        },
+    )
+
+
+def _build_schema3_manifest(
+    *,
+    product: str,
+    repository: str,
+    version: str,
+    build_id: str,
+    channel: str,
+    released_at: str,
+    git_sha: str,
+    vst3: Path,
+    screenshot: Path,
+    changelog: Path,
+    signing_team_id: str,
+    vst3_notary_id: str,
+    windows_vst3: Path,
+) -> dict[str, Any]:
+    expected_build_id = f"chromascope-v{version}-{git_sha[:12]}"
+    if build_id != expected_build_id:
+        raise ValueError(f"schema 3 build id must be {expected_build_id}")
+    if signing_team_id != CHROMASCOPE_TEAM_ID:
+        raise ValueError(f"schema 3 requires Apple team ID {CHROMASCOPE_TEAM_ID}")
+    if not NOTARY_ID.fullmatch(vst3_notary_id):
+        raise ValueError("production signing/notarization evidence is incomplete")
+
+    expected_macos_name = f"{product}-v{version}-macos.vst3.zip"
+    if vst3.name != expected_macos_name or not SAFE_NAME.fullmatch(vst3.name):
+        raise ValueError(f"VST3 artifact must be named {expected_macos_name}")
+    macos_hash, macos_size = _validated_file_digest(vst3, "VST3 artifact")
+
+    expected_windows_name = f"{product}-v{version}-windows-x86_64-unsigned.vst3.zip"
+    if windows_vst3.name != expected_windows_name or not SAFE_NAME.fullmatch(windows_vst3.name):
+        raise ValueError(f"Windows VST3 artifact must be named {expected_windows_name}")
+    windows_hash, windows_size = _validated_file_digest(windows_vst3, "Windows VST3 artifact")
+
+    screenshot_metadata, changelog_metadata = _schema3_asset_metadata(
+        product=product,
+        git_sha=git_sha,
+        screenshot=screenshot,
+        changelog=changelog,
+    )
+    artifacts = [
+        {
+            "format": "vst3",
+            "platform": "macos",
+            "architectures": ["arm64"],
+            "name": vst3.name,
+            "media_type": "application/zip",
+            "sha256": macos_hash,
+            "size_bytes": macos_size,
+            "security": {
+                "status": "signed",
+                "certificate": "Developer ID Application",
+                "team_id": CHROMASCOPE_TEAM_ID,
+                "notarized": True,
+                "stapled": True,
+                "notary_submission": vst3_notary_id,
+            },
+        },
+        {
+            "format": "vst3",
+            "platform": "windows",
+            "architectures": ["x86_64"],
+            "name": windows_vst3.name,
+            "media_type": "application/zip",
+            "sha256": windows_hash,
+            "size_bytes": windows_size,
+            "security": {"status": "unsigned", "certificate": None},
+        },
+    ]
+    names = [artifact["name"] for artifact in artifacts] + [screenshot.name, changelog.name]
+    if len(names) != len(set(names)):
+        raise ValueError("release file names must be unique")
+    return {
+        "schema_version": MANIFEST_SCHEMA_V3,
+        "product": product,
+        "build_id": build_id,
+        "version": version,
+        "channel": channel,
+        "released_at": released_at,
+        "source": {"repository": repository, "git_sha": git_sha, "dirty": False},
+        "distribution": "production",
+        "artifacts": artifacts,
+        "screenshot": screenshot_metadata,
+        "changelog": changelog_metadata,
+    }
+
+
+def _validate_schema2_manifest(manifest: dict[str, Any], root: Path) -> None:
     required = {"schema_version", "product", "build_id", "version", "channel", "released_at", "source", "distribution", "signing", "artifacts", "screenshot", "changelog"}
     if set(manifest) != required or manifest.get("schema_version") != MANIFEST_SCHEMA:
         raise ValueError("manifest schema or fields are invalid")
@@ -304,6 +506,143 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> None:
         raise ValueError("release-manifest.json is not canonical JSON")
 
 
+def _validate_schema3_manifest_file(root: Path, name: Any, expected_hash: Any, expected_size: Any) -> None:
+    if not isinstance(name, str) or not SAFE_NAME.fullmatch(name):
+        raise ValueError("schema 3 manifest file name is invalid")
+    if not isinstance(expected_hash, str) or not SHA256.fullmatch(expected_hash) or not isinstance(expected_size, int) or isinstance(expected_size, bool) or expected_size <= 0:
+        raise ValueError(f"schema 3 manifest file metadata is invalid: {name}")
+    path = root / name
+    _validate_regular_file(path, name)
+    actual_hash, actual_size = file_digest(path)
+    if actual_hash != expected_hash or actual_size != expected_size:
+        raise ValueError(f"manifest hash/size mismatch: {name}")
+
+
+def _validate_schema3_assets(manifest: dict[str, Any], root: Path, names: set[str]) -> None:
+    source_sha = manifest["source"]["git_sha"]
+    screenshot = manifest["screenshot"]
+    screenshot_fields = {"role", "name", "media_type", "width", "height", "logical_width", "logical_height", "dpi_scale", "source_git_sha", "sha256", "size_bytes"}
+    if (
+        not isinstance(screenshot, dict)
+        or set(screenshot) != screenshot_fields
+        or screenshot["role"] != "default-ui"
+        or not isinstance(screenshot["name"], str)
+        or screenshot["name"] in names
+        or screenshot["media_type"] != "image/png"
+        or screenshot["source_git_sha"] != source_sha
+        or screenshot["logical_width"] != screenshot["width"]
+        or screenshot["logical_height"] != screenshot["height"]
+        or screenshot["dpi_scale"] != 1.0
+        or not SCREENSHOT_NAME.fullmatch(screenshot["name"])
+        or not isinstance(screenshot["sha256"], str)
+        or not SHA256.fullmatch(screenshot["sha256"])
+        or not isinstance(screenshot["size_bytes"], int)
+        or isinstance(screenshot["size_bytes"], bool)
+        or screenshot["size_bytes"] <= 0
+    ):
+        raise ValueError("screenshot metadata is invalid")
+    _validate_schema3_manifest_file(root, screenshot["name"], screenshot["sha256"], screenshot["size_bytes"])
+    width, height, _, _ = validate_png(root / screenshot["name"])
+    if (width, height) != (screenshot["width"], screenshot["height"]) or not screenshot["name"].endswith(f"{width}x{height}.png"):
+        raise ValueError("screenshot dimensions do not match its manifest")
+    names.add(screenshot["name"])
+
+    changelog = manifest["changelog"]
+    if (
+        not isinstance(changelog, dict)
+        or set(changelog) != {"name", "format", "media_type", "sha256", "size_bytes"}
+        or changelog["name"] != "CHANGELOG.md"
+        or changelog["name"] in names
+        or changelog["format"] != "markdown"
+        or changelog["media_type"] != "text/markdown; charset=utf-8"
+        or not isinstance(changelog["sha256"], str)
+        or not SHA256.fullmatch(changelog["sha256"])
+        or not isinstance(changelog["size_bytes"], int)
+        or isinstance(changelog["size_bytes"], bool)
+        or changelog["size_bytes"] <= 0
+    ):
+        raise ValueError("changelog metadata is invalid")
+    _validate_schema3_manifest_file(root, changelog["name"], changelog["sha256"], changelog["size_bytes"])
+    names.add(changelog["name"])
+
+
+def _validate_schema3_manifest(manifest: dict[str, Any], root: Path) -> None:
+    required = {"schema_version", "product", "build_id", "version", "channel", "released_at", "source", "distribution", "artifacts", "screenshot", "changelog"}
+    if set(manifest) != required or manifest.get("schema_version") != MANIFEST_SCHEMA_V3:
+        raise ValueError("schema 3 manifest fields are invalid")
+    source = manifest["source"]
+    if not isinstance(source, dict) or set(source) != {"repository", "git_sha", "dirty"} or source.get("dirty") is not False:
+        raise ValueError("manifest source is invalid")
+    _validate_common(manifest["product"], source["repository"], manifest["version"], manifest["build_id"], manifest["channel"], manifest["released_at"], source["git_sha"])
+    if manifest["product"] != "chromascope" or manifest["channel"] != "nightly" or manifest["distribution"] != "production":
+        raise ValueError("schema 3 is only available for production Chromascope nightlies")
+    expected_build_id = f"chromascope-v{manifest['version']}-{source['git_sha'][:12]}"
+    if manifest["build_id"] != expected_build_id:
+        raise ValueError(f"schema 3 build id must be {expected_build_id}")
+
+    artifacts = manifest["artifacts"]
+    if not isinstance(artifacts, list) or len(artifacts) != 2:
+        raise ValueError("schema 3 manifest must contain exactly two VST3 artifacts")
+    expected_names = {
+        ("macos", "arm64"): f"chromascope-v{manifest['version']}-macos.vst3.zip",
+        ("windows", "x86_64"): f"chromascope-v{manifest['version']}-windows-x86_64-unsigned.vst3.zip",
+    }
+    seen_targets: set[tuple[str, str]] = set()
+    names: set[str] = set()
+    for artifact in artifacts:
+        if (
+            not isinstance(artifact, dict)
+            or set(artifact) != {"format", "platform", "architectures", "name", "media_type", "sha256", "size_bytes", "security"}
+            or artifact["format"] != "vst3"
+            or artifact["media_type"] != "application/zip"
+            or not isinstance(artifact["architectures"], list)
+            or len(artifact["architectures"]) != 1
+            or not isinstance(artifact["platform"], str)
+            or not isinstance(artifact["architectures"][0], str)
+            or not isinstance(artifact["name"], str)
+        ):
+            raise ValueError("schema 3 artifact metadata is invalid")
+        target = (artifact["platform"], artifact["architectures"][0])
+        if target not in expected_names or target in seen_targets or artifact["name"] != expected_names[target] or artifact["name"] in names:
+            raise ValueError("schema 3 artifact identity is invalid")
+        if target == ("macos", "arm64"):
+            security = artifact["security"]
+            if (
+                not isinstance(security, dict)
+                or set(security) != {"status", "certificate", "team_id", "notarized", "stapled", "notary_submission"}
+                or security["status"] != "signed"
+                or security["certificate"] != "Developer ID Application"
+                or security["team_id"] != CHROMASCOPE_TEAM_ID
+                or security["notarized"] is not True
+                or security["stapled"] is not True
+                or not isinstance(security["notary_submission"], str)
+                or not NOTARY_ID.fullmatch(security["notary_submission"])
+            ):
+                raise ValueError("schema 3 artifact security is invalid")
+        elif artifact["security"] != {"status": "unsigned", "certificate": None}:
+            raise ValueError("schema 3 artifact security is invalid")
+        _validate_schema3_manifest_file(root, artifact["name"], artifact["sha256"], artifact["size_bytes"])
+        seen_targets.add(target)
+        names.add(artifact["name"])
+    if seen_targets != set(expected_names):
+        raise ValueError("schema 3 artifact targets are incomplete")
+    _validate_schema3_assets(manifest, root, names)
+    manifest_path = root / "release-manifest.json"
+    if manifest_path.is_file() and manifest_path.read_bytes() != canonical_json(manifest):
+        raise ValueError("release-manifest.json is not canonical JSON")
+
+
+def validate_manifest(manifest: dict[str, Any], root: Path) -> None:
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest must be an object")
+    if manifest.get("schema_version") == MANIFEST_SCHEMA_V2:
+        _validate_schema2_manifest(manifest, root)
+    elif manifest.get("schema_version") == MANIFEST_SCHEMA_V3:
+        _validate_schema3_manifest(manifest, root)
+    else:
+        raise ValueError("manifest schema or fields are invalid")
+
+
 def validate_canonical_source(manifest: dict[str, Any], repo_root: Path) -> None:
     def git(*args: str) -> str:
         result = subprocess.run(["git", *args], cwd=repo_root, text=True, capture_output=True, check=False)
@@ -337,6 +676,8 @@ def publish_release(*, endpoint: str, token: str, manifest: dict[str, Any], root
         raise ValueError("production publishing requires the exact PortalSurfer origin")
     if not token:
         raise ValueError("PORTALSURFER_RELEASE_TOKEN is required for publishing")
+    if manifest.get("schema_version") != MANIFEST_SCHEMA_V2:
+        raise ValueError("the Python publisher supports schema 2 manifests only")
     if manifest.get("distribution") != "production":
         raise ValueError("only production manifests may be published")
     validate_manifest(manifest, root)

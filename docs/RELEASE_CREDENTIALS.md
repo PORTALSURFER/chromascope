@@ -11,7 +11,9 @@ secrets, SSH keys, or deployment configuration.
 
 Add these in GitHub at PORTALSURFER/chromascope -> Settings -> Secrets and
 variables -> Actions. The Apple and PortalSurfer release entries belong to
-the production environment.
+the production environment. Only the final macOS publication job reads these
+production secrets; the prepare and Windows jobs have no production secrets,
+Apple credentials, or `id-token` permission.
 
 | Name | Destination | Required when | Purpose |
 | --- | --- | --- | --- |
@@ -22,6 +24,16 @@ the production environment.
 | APPLE_NOTARY_ISSUER_ID | production environment secret | Before the first release workflow run; not preflight | App Store Connect issuer ID. No separate team-ID field is read. |
 | APPLE_CODESIGN_IDENTITY | production environment secret | Optional, only if automatic identity selection is ambiguous | Explicit Developer ID Application identity override. |
 | PORTALSURFER_RELEASE_TOKEN | production environment secret | Before a published release (publish=true); not preflight/package-only | PortalSurfer release-publisher bearer credential; it has no GitHub API scope. |
+
+Schema-3 nightly publication also requires the final job's GitHub Actions
+`id-token: write` permission. The pinned PortalSurfer publisher is fetched at
+commit `165776d6707ab6d9e8bb76b2a8866654140ca6bc` and requests a short-lived
+OIDC release attestation only after all release files are staged. This is an
+ephemeral GitHub-issued token, not a new repository or environment secret.
+The Windows workflow is explicitly unsigned and receives no Apple or
+PortalSurfer credentials. Stable and RC publications remain schema 2 and use
+the existing macOS-only contract.
+
 The generated workflows reference no GitHub Actions variables, so the
 credentials stage creates no variables. GitHub's automatic GITHUB_TOKEN is
 used for the metadata-only GitHub Release operation.

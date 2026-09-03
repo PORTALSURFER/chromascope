@@ -8,9 +8,14 @@ on:
       - src/**
       - scripts/release.sh
       - scripts/release_helper.py
+      - scripts/windows_release_helper.py
       - .github/workflows/release-preflight.yml
       - .github/workflows/release.yml
+      - .github/workflows/windows-release.yml
       - .github/workflows/nightly.yml
+      - docs/WINDOWS_RELEASE.md
+      - docs/landing-page-contract.md
+      - docs/RELEASE_CREDENTIALS.md
   workflow_dispatch:
 
 permissions:

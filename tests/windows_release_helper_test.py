@@ -252,9 +252,18 @@ class WindowsReleaseHelperTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
         self.assertIn("runs-on: windows-2022", workflow)
         self.assertNotIn("runs-on: windows-latest", workflow)
+        self.assertIn("workflow_call:", workflow)
+        for shared_input in ("source_sha", "package_version", "publication_version", "channel", "build_id", "released_at"):
+            self.assertIn(f"      {shared_input}:", workflow)
+        self.assertIn("test \"${build_id}\" = \"${expected_build_id}\"", workflow)
         self.assertIn("toolchain: ${{ env.RUST_TOOLCHAIN }}", workflow)
         self.assertIn("RUST_TOOLCHAIN: 1.97.1", workflow)
         self.assertIn("RUST_TARGET: x86_64-pc-windows-msvc", workflow)
+        self.assertNotIn("id-token:", workflow)
+        self.assertNotIn("secrets.", workflow)
+        self.assertIn("name: chromascope-windows-${{ steps.metadata.outputs.build_id }}", workflow)
+        self.assertIn("name: chromascope-${{ steps.metadata.outputs.publication_version }}-windows-x86_64-unsigned", workflow)
+        self.assertIn("windows-artifact-manifest.json", workflow)
         for argument in (
             "--runner-image-version",
             "--rust-toolchain",

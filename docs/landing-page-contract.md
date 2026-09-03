@@ -13,11 +13,16 @@ The bootstrap flow keeps product release metadata and rendered page content sepa
 
 - Stable slug: chromascope
 - Repository: PORTALSURFER/chromascope
-+         - Release API: /plugins/api/v1/products/chromascope/releases
-+         - Page: /plugins/chromascope/
-+         - Formats: vst3
-+         - Platform: macOS arm64
+- Release API: `/plugins/api/v1/products/chromascope/releases`
+- Page: `/plugins/chromascope/`
+- Formats: VST3
+- Stable/RC platform: macOS arm64
+- Nightly platforms: macOS arm64 signed plus Windows x86_64 explicitly unsigned
+- Stable/RC release manifest: schema 2
+- Nightly release manifest: one PortalSurfer schema 3 release containing both
+  platform archives; screenshot and changelog remain release metadata, not
+  download artifacts
 
 ## Safety
 
-Plan mode is the default for every stage and for bootstrap. Input is validated before an execute stage mutates anything. Existing generated output is resumed only when its identity matches; unrelated landing pages are never overwritten. Secret values, SSH keys, GitHub tokens, and server .env values remain outside this CLI.
+Plan mode is the default for every stage and for bootstrap. Input is validated before an execute stage mutates anything. Existing generated output is resumed only when its identity matches; unrelated landing pages are never overwritten. Secret values, SSH keys, GitHub tokens, and server .env values remain outside this CLI. The nightly release job uses the existing production environment and a short-lived GitHub OIDC attestation; it does not add an OIDC secret.
