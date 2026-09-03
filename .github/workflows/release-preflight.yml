@@ -18,6 +18,8 @@ on:
       - docs/WINDOWS_RELEASE.md
       - docs/landing-page-contract.md
       - docs/RELEASE_CREDENTIALS.md
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -43,7 +45,7 @@ jobs:
       released_at: ${{ steps.metadata.outputs.released_at }}
       attempt_suffix: ${{ steps.metadata.outputs.attempt_suffix }}
     steps:
-      - name: Checkout exact PR head
+      - name: Checkout exact source head
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -97,7 +99,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout exact PR head
+      - name: Checkout exact source head
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
@@ -158,13 +160,13 @@ jobs:
     permissions:
       contents: read
 
-  integration:
+  artifact_contract:
     needs: [prepare, preflight, windows_integration]
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - name: Checkout exact PR head
+      - name: Checkout exact source head
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
@@ -180,25 +182,100 @@ jobs:
         with:
           name: chromascope-windows-${{ needs.prepare.outputs.build_id }}
           path: ${{ runner.temp }}/chromascope-windows
-      - name: Fetch pinned PortalSurfer publisher
+      - name: Verify exact source identity
+        env:
+          EXPECTED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXPECTED_SOURCE_SHA}"
+      - name: Execute producer-side artifact contract
+        env:
+          MACOS_ARTIFACT_ROOT: ${{ runner.temp }}/chromascope-macos-preflight
+          WINDOWS_ARTIFACT_ROOT: ${{ runner.temp }}/chromascope-windows
+          PACKAGE_VERSION: ${{ needs.prepare.outputs.package_version }}
+          PUBLICATION_VERSION: ${{ needs.prepare.outputs.publication_version }}
+          BUILD_ID: ${{ needs.prepare.outputs.build_id }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          RELEASED_AT: ${{ needs.prepare.outputs.released_at }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/release_pipeline_integration.py \
+            --mode artifact-contract \
+            --macos-artifact-root "${MACOS_ARTIFACT_ROOT}" \
+            --windows-artifact-root "${WINDOWS_ARTIFACT_ROOT}" \
+            --package-version "${PACKAGE_VERSION}" \
+            --publication-version "${PUBLICATION_VERSION}" \
+            --build-id "${BUILD_ID}" \
+            --source-sha "${SOURCE_SHA}" \
+            --released-at "${RELEASED_AT}" \
+            --scratch-parent "${RUNNER_TEMP}"
+
+  publisher_integration:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [prepare, preflight, windows_integration, artifact_contract]
+    runs-on: ubuntu-latest
+    environment: publisher-integration
+    permissions:
+      contents: read
+    steps:
+      - name: Create scoped PortalSurfer publisher token
+        id: publisher_token
+        uses: actions/create-github-app-token@7e473efe3cb98aa54f8d4bac15400b15fad77d94 # v2.2.0
+        with:
+          app-id: ${{ vars.PORTALSURFER_PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.PORTALSURFER_PUBLISHER_PRIVATE_KEY }}
+          owner: PORTALSURFER
+          repositories: portalsurfer.org
+          permission-contents: read
+      - name: Checkout exact trusted source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download macOS preflight artifact from this run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: chromascope-macos-preflight-${{ needs.prepare.outputs.build_id }}-${{ needs.prepare.outputs.attempt_suffix }}
+          path: ${{ runner.temp }}/chromascope-macos-preflight
+      - name: Download Windows artifact from this run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: chromascope-windows-${{ needs.prepare.outputs.build_id }}
+          path: ${{ runner.temp }}/chromascope-windows
+      - name: Verify exact trusted source identity
+        env:
+          EXPECTED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXPECTED_SOURCE_SHA}"
+      - name: Checkout exact PortalSurfer publisher
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: PORTALSURFER/portalsurfer.org
+          ref: 165776d6707ab6d9e8bb76b2a8866654140ca6bc
+          token: ${{ steps.publisher_token.outputs.token }}
+          path: portalsurfer-publisher
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify pinned PortalSurfer publisher checkout
         id: publisher
         env:
-          PUBLISHER_REPOSITORY: https://github.com/PORTALSURFER/portalsurfer.org.git
           PUBLISHER_COMMIT: 165776d6707ab6d9e8bb76b2a8866654140ca6bc
         shell: bash
         run: |
           set -euo pipefail
-          publisher_dir="${RUNNER_TEMP}/portalsurfer-publisher"
-          git init --quiet "${publisher_dir}"
-          git -C "${publisher_dir}" remote add origin "${PUBLISHER_REPOSITORY}"
-          git -C "${publisher_dir}" fetch --depth 1 origin "${PUBLISHER_COMMIT}"
-          git -C "${publisher_dir}" checkout --quiet --detach "${PUBLISHER_COMMIT}"
+          publisher_dir="${GITHUB_WORKSPACE}/portalsurfer-publisher"
           test "$(git -C "${publisher_dir}" rev-parse HEAD)" = "${PUBLISHER_COMMIT}"
           ! git -C "${publisher_dir}" symbolic-ref --quiet HEAD
+          test -z "$(git -C "${publisher_dir}" status --porcelain --untracked-files=all)"
           publisher_script="${publisher_dir}/scripts/publish-plugin-release.mjs"
           test -f "${publisher_script}" && test ! -L "${publisher_script}"
           echo "path=${publisher_script}" >> "${GITHUB_OUTPUT}"
-      - name: Execute non-production release pipeline integration
+      - name: Execute publisher integration against loopback mocks
         env:
           MACOS_ARTIFACT_ROOT: ${{ runner.temp }}/chromascope-macos-preflight
           WINDOWS_ARTIFACT_ROOT: ${{ runner.temp }}/chromascope-windows
@@ -212,6 +289,7 @@ jobs:
         run: |
           set -euo pipefail
           PYTHONDONTWRITEBYTECODE=1 python3 tests/release_pipeline_integration.py \
+            --mode publisher-integration \
             --macos-artifact-root "${MACOS_ARTIFACT_ROOT}" \
             --windows-artifact-root "${WINDOWS_ARTIFACT_ROOT}" \
             --publisher-script "${PUBLISHER_SCRIPT}" \

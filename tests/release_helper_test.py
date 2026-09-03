@@ -235,7 +235,7 @@ class ReleaseHelperTests(unittest.TestCase):
                     **{key: value for key, value in common.items() if key != "signing_team_id"},
                 )
 
-    def test_release_contract_pins_combined_workflow_and_publisher_transport(self) -> None:
+    def test_release_contract_pins_scoped_publisher_checkout(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         script = (ROOT / "scripts" / "release.sh").read_text(encoding="utf-8")
         self.assertIn("prepare:", workflow)
@@ -244,7 +244,19 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertIn("scripts/windows_release_helper.py validate", workflow)
         self.assertIn("id-token: write", workflow)
         self.assertEqual(workflow.count("id-token: write"), 1)
+        self.assertIn(
+            "actions/create-github-app-token@7e473efe3cb98aa54f8d4bac15400b15fad77d94",
+            workflow,
+        )
+        self.assertIn("app-id: ${{ vars.PORTALSURFER_PUBLISHER_APP_ID }}", workflow)
+        self.assertIn("private-key: ${{ secrets.PORTALSURFER_PUBLISHER_PRIVATE_KEY }}", workflow)
+        self.assertIn("owner: PORTALSURFER", workflow)
+        self.assertIn("repositories: portalsurfer.org", workflow)
+        self.assertIn("permission-contents: read", workflow)
+        self.assertIn("token: ${{ steps.publisher_token.outputs.token }}", workflow)
+        self.assertIn("persist-credentials: false", workflow)
         self.assertIn("165776d6707ab6d9e8bb76b2a8866654140ca6bc", workflow)
+        self.assertNotIn('git -C "${publisher_dir}" fetch', workflow)
         for shared_field in ("source_sha", "package_version", "publication_version", "channel", "build_id", "released_at"):
             self.assertIn(shared_field, workflow)
         self.assertIn("--windows-release-dir", script)
@@ -252,16 +264,14 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertIn('node "${publisher_script}"', script)
         self.assertNotIn("--token", script)
 
-    def test_release_preflight_executes_pr_safe_combined_nightly_chain(self) -> None:
+    def test_release_preflight_separates_untrusted_and_trusted_lanes(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "release-preflight.yml").read_text(encoding="utf-8")
         production_workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         harness = (ROOT / "tests" / "release_pipeline_integration.py").read_text(encoding="utf-8")
 
         self.assertNotIn("pull_request_target", workflow)
-        self.assertNotIn("secrets", workflow)
-        self.assertNotIn("environment: production", workflow)
-        self.assertNotIn("contents: write", workflow)
-        self.assertNotIn("id-token: write", workflow)
+        self.assertNotIn("workflow_run", workflow)
+        self.assertIn("push:\n    branches: [main]", workflow)
         for action in re.findall(r"(?m)^\s+uses:\s+([^\s#]+)", workflow):
             if not action.startswith("./"):
                 self.assertRegex(action, r"@[0-9a-f]{40}\Z", action)
@@ -270,8 +280,20 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertIn("github.run_attempt", workflow)
         self.assertIn("attempt_suffix", workflow)
 
-        windows_lane = workflow.split("\n  windows_integration:\n", 1)[1].split("\n  integration:\n", 1)[0]
-        integration_lane = workflow.split("\n  integration:\n", 1)[1]
+        producer_lane, publisher_lane = workflow.split("\n  publisher_integration:\n", 1)
+        for forbidden in (
+            "secrets",
+            "environment:",
+            "contents: write",
+            "actions: write",
+            "id-token:",
+            "PORTALSURFER/portalsurfer.org",
+            "PUBLISHER_COMMIT",
+        ):
+            self.assertNotIn(forbidden, producer_lane)
+
+        windows_lane = producer_lane.split("\n  windows_integration:\n", 1)[1].split("\n  artifact_contract:\n", 1)[0]
+        artifact_lane = producer_lane.split("\n  artifact_contract:\n", 1)[1]
         self.assertIn("uses: ./.github/workflows/windows-release.yml", windows_lane)
         self.assertIn("permissions:\n      contents: read", windows_lane)
         self.assertNotRegex(windows_lane, r"(?m)^\s*(?:environment|secrets):")
@@ -279,19 +301,41 @@ class ReleaseHelperTests(unittest.TestCase):
             self.assertIn(f"      {field}: ${{{{ needs.prepare.outputs.{field} }}}}", windows_lane)
         self.assertIn("      channel: nightly", windows_lane)
 
-        self.assertIn("needs: [prepare, preflight, windows_integration]", integration_lane)
-        self.assertNotRegex(integration_lane, r"(?m)^\s*secrets(?:\.|:)")
-        self.assertNotRegex(integration_lane, r"(?m)^\s*environment:")
-        self.assertNotRegex(integration_lane, r"(?m)^\s*(?:contents|actions|id-token):\s*write\b")
-        self.assertEqual(integration_lane.count("actions/download-artifact@"), 2)
+        self.assertIn("needs: [prepare, preflight, windows_integration]", artifact_lane)
+        self.assertNotRegex(artifact_lane, r"(?m)^\s*secrets(?:\.|:)")
+        self.assertNotRegex(artifact_lane, r"(?m)^\s*environment:")
+        self.assertNotRegex(artifact_lane, r"(?m)^\s*(?:contents|actions|id-token):\s*write\b")
+        self.assertEqual(artifact_lane.count("actions/download-artifact@"), 2)
         self.assertIn(
             "name: chromascope-macos-preflight-${{ needs.prepare.outputs.build_id }}-${{ needs.prepare.outputs.attempt_suffix }}",
-            integration_lane,
+            artifact_lane,
         )
-        self.assertIn("name: chromascope-windows-${{ needs.prepare.outputs.build_id }}", integration_lane)
+        self.assertIn("name: chromascope-windows-${{ needs.prepare.outputs.build_id }}", artifact_lane)
+        self.assertIn("--mode artifact-contract", artifact_lane)
         for forbidden in ("token:", "repository:", "run-id:", "pattern:", "merge-multiple:"):
-            self.assertNotIn(forbidden, integration_lane)
-        self.assertIn("tests/release_pipeline_integration.py", workflow)
+            self.assertNotIn(forbidden, artifact_lane)
+
+        self.assertIn("if: github.event_name == 'push' && github.ref == 'refs/heads/main'", publisher_lane)
+        self.assertIn("needs: [prepare, preflight, windows_integration, artifact_contract]", publisher_lane)
+        self.assertIn("environment: publisher-integration", publisher_lane)
+        self.assertIn("permissions:\n      contents: read", publisher_lane)
+        self.assertIn("actions/create-github-app-token@7e473efe3cb98aa54f8d4bac15400b15fad77d94", publisher_lane)
+        self.assertIn("private-key: ${{ secrets.PORTALSURFER_PUBLISHER_PRIVATE_KEY }}", publisher_lane)
+        self.assertIn("app-id: ${{ vars.PORTALSURFER_PUBLISHER_APP_ID }}", publisher_lane)
+        self.assertIn("repository: PORTALSURFER/portalsurfer.org", publisher_lane)
+        self.assertIn("ref: 165776d6707ab6d9e8bb76b2a8866654140ca6bc", publisher_lane)
+        self.assertIn("token: ${{ steps.publisher_token.outputs.token }}", publisher_lane)
+        self.assertIn("persist-credentials: false", publisher_lane)
+        self.assertIn("--mode publisher-integration", publisher_lane)
+        for forbidden in (
+            "APPLE_",
+            "PORTALSURFER_RELEASE_TOKEN",
+            "id-token:",
+            "contents: write",
+            "actions: write",
+            "environment: production",
+        ):
+            self.assertNotIn(forbidden, publisher_lane)
 
         def publisher_pin(text: str) -> str:
             match = re.search(r"(?m)^\s*PUBLISHER_COMMIT:\s*([0-9a-f]{40})\s*$", text)
@@ -301,6 +345,7 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertEqual(publisher_pin(workflow), publisher_pin(production_workflow))
         self.assertEqual(publisher_pin(workflow), "165776d6707ab6d9e8bb76b2a8866654140ca6bc")
         for argument in (
+            "--mode",
             "--macos-artifact-root",
             "--windows-artifact-root",
             "--publisher-script",
@@ -312,6 +357,10 @@ class ReleaseHelperTests(unittest.TestCase):
         ):
             self.assertIn(argument, harness)
         for contract in (
+            'choices=("artifact-contract", "publisher-integration")',
+            "run_artifact_contract(args)",
+            "run_publisher_integration(args)",
+            "_require_combined_scratch(",
             "windows_release_helper.validate_manifest(",
             "release_helper.build_manifest(",
             "release_helper.canonical_json(",

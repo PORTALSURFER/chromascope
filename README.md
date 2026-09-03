@@ -98,7 +98,12 @@ This folder is an independently bootstrapped AudioDev repository. The local
 `scripts/dist.sh` is intentionally VST3-only; production releases are built
 and published by the checked-in GitHub Actions workflows:
 
-- `.github/workflows/release-preflight.yml` builds an ad-hoc VST3 for review.
+- `.github/workflows/release-preflight.yml` runs on pull requests and trusted
+  pushes to `main`. Its unprivileged producer lane builds the real macOS and
+  Windows nightly artifacts and runs the explicit `artifact-contract` harness;
+  it never fetches the private publisher or reads release credentials. A
+  push to `main` additionally runs the protected `publisher-integration` lane
+  with a scoped, short-lived GitHub App token.
 - `.github/workflows/release.yml` prepares one shared source/version/timestamp
   identity, builds the signed/notarized macOS arm64 VST3, and for nightlies
   combines it with the explicitly unsigned Windows x86_64 VST3 in one
@@ -112,9 +117,12 @@ and published by the checked-in GitHub Actions workflows:
 See [docs/WINDOWS_RELEASE.md](docs/WINDOWS_RELEASE.md) for the Windows bundle,
 manifest, and validation contract. Standalone Windows dispatches do not publish
 binaries through a GitHub Release or PortalSurfer; a called nightly publishes
-both platform archives together through the one PortalSurfer release. Schema-3
-publishing uses the final job's short-lived GitHub OIDC attestation and adds no
-new long-lived secret.
+both platform archives together through the one PortalSurfer release. The
+`publisher-integration` harness is an explicit strict loopback test with fake
+credentials and performs no real upload. Production schema-3 publishing uses
+the final job's short-lived GitHub OIDC attestation; its private publisher
+checkout uses the scoped GitHub App token documented in
+[docs/RELEASE_CREDENTIALS.md](docs/RELEASE_CREDENTIALS.md).
 
 The staged bootstrap CLI also consumes `site/landing-page.json` to render the
 PortalSurfer page and `site/product.json` to register the product. Plan mode is

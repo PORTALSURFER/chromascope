@@ -7,13 +7,15 @@ bootstrapper. The credentials stage can create or update only the GitHub
 Actions entries listed here. It never handles PortalSurfer server-side
 secrets, SSH keys, or deployment configuration.
 
-## GitHub Actions secrets
+## GitHub Actions credentials
 
 Add these in GitHub at PORTALSURFER/chromascope -> Settings -> Secrets and
-variables -> Actions. The Apple and PortalSurfer release entries belong to
-the production environment. Only the final macOS publication job reads these
-production secrets; the prepare and Windows jobs have no production secrets,
-Apple credentials, or `id-token` permission.
+variables -> Actions. The Apple and PortalSurfer upload entries belong to the
+production environment. The publisher App private key must be available in
+both the protected `publisher-integration` and `production` environments. The
+pull-request producer jobs and reusable Windows job have no production
+secrets, Apple credentials, private publisher checkout, or `id-token`
+permission.
 
 | Name | Destination | Required when | Purpose |
 | --- | --- | --- | --- |
@@ -24,19 +26,43 @@ Apple credentials, or `id-token` permission.
 | APPLE_NOTARY_ISSUER_ID | production environment secret | Before the first release workflow run; not preflight | App Store Connect issuer ID. No separate team-ID field is read. |
 | APPLE_CODESIGN_IDENTITY | production environment secret | Optional, only if automatic identity selection is ambiguous | Explicit Developer ID Application identity override. |
 | PORTALSURFER_RELEASE_TOKEN | production environment secret | Before a published release (publish=true); not preflight/package-only | PortalSurfer release-publisher bearer credential; it has no GitHub API scope. |
+| PORTALSURFER_PUBLISHER_APP_ID | `publisher-integration` and `production` environment variable (or repository variable) | Before a trusted-main publisher integration or published release | Numeric ID of the least-privilege GitHub App installation; not a secret. |
+| PORTALSURFER_PUBLISHER_PRIVATE_KEY | `publisher-integration` and `production` environment secrets | Before a trusted-main publisher integration or published release | Private key for the least-privilege GitHub App installation that can read `PORTALSURFER/portalsurfer.org` contents. |
 
-Schema-3 nightly publication also requires the final job's GitHub Actions
-`id-token: write` permission. The pinned PortalSurfer publisher is fetched at
-commit `165776d6707ab6d9e8bb76b2a8866654140ca6bc` and requests a short-lived
-OIDC release attestation only after all release files are staged. This is an
-ephemeral GitHub-issued token, not a new repository or environment secret.
-The Windows workflow is explicitly unsigned and receives no Apple or
-PortalSurfer credentials. Stable and RC publications remain schema 2 and use
-the existing macOS-only contract.
+Add `PORTALSURFER_PUBLISHER_APP_ID` as an Actions variable (repository or in
+each protected environment). It is the numeric App ID, not a secret. The
+workflows use `actions/create-github-app-token` pinned to
+`7e473efe3cb98aa54f8d4bac15400b15fad77d94` (v2.2.0), with owner
+`PORTALSURFER`, repository `portalsurfer.org`, and contents-only read
+permission. The private publisher is checked out detached at commit
+`165776d6707ab6d9e8bb76b2a8866654140ca6bc` with `persist-credentials: false`.
 
-The generated workflows reference no GitHub Actions variables, so the
-credentials stage creates no variables. GitHub's automatic GITHUB_TOKEN is
-used for the metadata-only GitHub Release operation.
+The pull-request and trusted-main artifact lanes use the explicit
+`artifact-contract` mode. It validates the real macOS/Windows artifacts,
+shared identity, schema 3, hashes, security metadata, and the exact five-file
+assembly scratch set. Only the protected trusted-main job runs the explicit
+`publisher-integration` mode, which uses loopback API/OIDC mocks and fake
+credentials. It has no Apple, PortalSurfer upload, or `id-token` permission.
+
+Production schema-3 nightly publication also requires the final macOS job's
+GitHub Actions `id-token: write` permission and the Apple credentials above.
+The pinned PortalSurfer publisher requests a short-lived OIDC release
+attestation only after all files are staged. This is an ephemeral
+GitHub-issued token, not a repository or environment secret. The Windows
+workflow is explicitly unsigned and receives no Apple or PortalSurfer upload
+credentials. Stable and RC publications remain schema 2 and use the existing
+macOS-only contract.
+
+The generated workflows use the App ID variable above and the environment
+private-key secret for private publisher retrieval. GitHub's automatic
+`GITHUB_TOKEN` is used for the metadata-only GitHub Release operation; the
+`PORTALSURFER_RELEASE_TOKEN` is never used for GitHub access.
+
+The `publisher-integration` and `production` environments must remain protected
+by reviewer/branch restrictions so only trusted `main` and approved release
+dispatches can access the App key. Keep `main` protected with the repository's
+required checks and review rules; do not replace this design with
+`pull_request_target` or a privileged `workflow_run` that consumes PR artifacts.
 
 ## Credential-stage setup
 

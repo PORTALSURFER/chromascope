@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Execute the non-production Chromascope nightly release pipeline contract."""
+"""Validate the Chromascope nightly artifact and publisher-integration contracts."""
 
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import http.server
 import json
@@ -14,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 
@@ -583,22 +584,18 @@ def _assert_scratch_has_no_secrets(scratch: Path) -> None:
             )
 
 
-def run_integration(args: argparse.Namespace) -> None:
-    publisher = Path(args.publisher_script).resolve()
-    _require_regular_file(publisher, "publisher script")
-    require(not publisher.is_symlink(), "publisher script must not be a symlink")
-    require(publisher.name == "publish-plugin-release.mjs", "publisher script has an unexpected name")
-    _verify_publisher_pin(publisher)
+@contextmanager
+def _assembled_release(args: argparse.Namespace) -> Iterator[tuple[dict[str, Any], Path]]:
     release_helper.validate_publication_version(args.package_version, args.publication_version, "nightly")
 
-    _, mac_root, mac_archive, mac_screenshot, mac_changelog = _load_macos_preflight(
+    _, _, mac_archive, mac_screenshot, mac_changelog = _load_macos_preflight(
         Path(args.macos_artifact_root),
         package_version=args.package_version,
         build_id=args.build_id,
         source_sha=args.source_sha,
         released_at=args.released_at,
     )
-    _, windows_root, windows_archive = _load_windows_artifact(
+    _, _, windows_archive = _load_windows_artifact(
         Path(args.windows_artifact_root),
         package_version=args.package_version,
         publication_version=args.publication_version,
@@ -606,8 +603,6 @@ def run_integration(args: argparse.Namespace) -> None:
         source_sha=args.source_sha,
         released_at=args.released_at,
     )
-    del mac_root, windows_root
-
     scratch_parent = Path(args.scratch_parent).resolve() if args.scratch_parent else None
     with tempfile.TemporaryDirectory(prefix="chromascope-release-integration-", dir=scratch_parent) as directory:
         scratch = Path(directory)
@@ -655,10 +650,53 @@ def run_integration(args: argparse.Namespace) -> None:
         )
         require(not (scratch / "windows-artifact-manifest.json").exists(), "Windows sidecar leaked into assembly scratch")
         _assert_scratch_has_no_secrets(scratch)
+        yield manifest, scratch
+
+
+def _require_combined_scratch(scratch: Path, manifest: dict[str, Any], label: str) -> None:
+    _require_exact_entries(
+        scratch,
+        {file["name"] for file in _manifest_files(manifest)} | {"release-manifest.json"},
+        label,
+    )
+    _assert_scratch_has_no_secrets(scratch)
+
+
+def run_artifact_contract(args: argparse.Namespace) -> None:
+    with _assembled_release(args) as (manifest, scratch):
+        artifacts = manifest["artifacts"]
+        require(
+            artifacts[0]["security"] == {
+                "status": "signed",
+                "certificate": "Developer ID Application",
+                "team_id": release_helper.CHROMASCOPE_TEAM_ID,
+                "notarized": True,
+                "stapled": True,
+                "notary_submission": TEST_NOTARY_ID,
+            },
+            "schema 3 macOS security metadata is invalid",
+        )
+        require(
+            artifacts[1]["security"] == {"status": "unsigned", "certificate": None},
+            "schema 3 Windows security metadata is invalid",
+        )
+        _require_combined_scratch(scratch, manifest, "combined release scratch")
+
+
+def run_publisher_integration(args: argparse.Namespace) -> None:
+    publisher = Path(args.publisher_script).resolve()
+    _require_regular_file(publisher, "publisher script")
+    require(not publisher.is_symlink(), "publisher script must not be a symlink")
+    require(publisher.name == "publish-plugin-release.mjs", "publisher script has an unexpected name")
+    _verify_publisher_pin(publisher)
+
+    with _assembled_release(args) as (manifest, scratch):
+        _require_combined_scratch(scratch, manifest, "combined release scratch")
 
         trace = Trace()
         api_mock = ApiMock(manifest, scratch, trace)
         api_server, api_thread, api_endpoint = _start_server(api_mock)
+        manifest_bytes = release_helper.canonical_json(manifest)
         audience = f"{api_endpoint}/plugins/api/v1/products/chromascope/release-attestations/sha256/{hashlib.sha256(manifest_bytes).hexdigest()}"
         oidc_mock = OidcMock(audience, trace)
         oidc_server, oidc_thread, oidc_endpoint = _start_server(oidc_mock)
@@ -696,7 +734,7 @@ def run_integration(args: argparse.Namespace) -> None:
             require(api_mock.stage_records == api_mock.stage_names, "publisher did not stage the expected files")
             require(api_mock.commit_count == 1, "publisher did not perform exactly one final commit")
             require(oidc_mock.request_count == 1, "publisher did not perform exactly one OIDC request")
-            _assert_scratch_has_no_secrets(scratch)
+            _require_combined_scratch(scratch, manifest, "combined release scratch after publisher integration")
         finally:
             _stop_server(oidc_server, oidc_thread)
             _stop_server(api_server, api_thread)
@@ -704,9 +742,10 @@ def run_integration(args: argparse.Namespace) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("artifact-contract", "publisher-integration"), required=True)
     parser.add_argument("--macos-artifact-root", required=True)
     parser.add_argument("--windows-artifact-root", required=True)
-    parser.add_argument("--publisher-script", required=True)
+    parser.add_argument("--publisher-script", help="Pinned Node publisher script; required for publisher-integration")
     parser.add_argument("--package-version", required=True)
     parser.add_argument("--publication-version", required=True)
     parser.add_argument("--build-id", required=True)
@@ -720,14 +759,19 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        run_integration(args)
+        if args.mode == "artifact-contract":
+            require(args.publisher_script is None, "--publisher-script is only valid for publisher-integration")
+            run_artifact_contract(args)
+        else:
+            require(args.publisher_script is not None, "--publisher-script is required for publisher-integration")
+            run_publisher_integration(args)
     except (HarnessError, OSError, ValueError) as error:
         print(f"release pipeline integration failed: {_redact(str(error))}", file=sys.stderr)
         return 1
-    print(
-        "release pipeline integration ok: schema-2 macOS preflight + validated Windows sidecar "
-        "assembled schema 3; 4 files staged, 1 commit; mocked OIDC was transport-only."
-    )
+    if args.mode == "artifact-contract":
+        print("artifact contract ok: real macOS preflight + Windows sidecar assembled schema 3 with an exact five-file scratch set.")
+    else:
+        print("publisher integration ok: schema 3 staged through strict loopback API/OIDC mocks; 4 files staged, 1 commit.")
     return 0
 
 

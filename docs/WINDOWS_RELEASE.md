@@ -99,12 +99,23 @@ checks every shared field, and passes the Windows directory to `scripts/release.
 The script copies only the validated Windows archive into the final release
 directory; `windows-artifact-manifest.json` is never part of the public bundle.
 
+The release-preflight producer lane builds the real macOS and Windows artifacts
+and runs `tests/release_pipeline_integration.py --mode artifact-contract`. That
+mode validates shared identity, schema 3, hashes, security metadata, and the
+exact five-file assembly scratch set without fetching the private publisher or
+reading secrets. A push to `main` additionally runs the protected
+`publisher-integration` job with `--mode publisher-integration`; it checks out
+the pinned private publisher with a contents-only GitHub App token and exercises
+only loopback API/OIDC mocks with fake credentials. It performs no real upload.
+
 The final macOS job builds the signed, notarized, stapled arm64 archive and
 publishes both platform archives in one PortalSurfer schema-3 release. Its
 per-artifact security evidence records the fixed Apple team ID for macOS and
-explicit `unsigned`/`null` certificate evidence for Windows. The pinned
-PortalSurfer publisher obtains a short-lived GitHub OIDC attestation only after
-all files are staged; no new OIDC secret is required.
+explicit `unsigned`/`null` certificate evidence for Windows. When `publish=true`,
+the protected production job uses the same scoped App-token checkout pattern;
+the PortalSurfer upload bearer remains `PORTALSURFER_RELEASE_TOKEN`, and the
+publisher obtains a short-lived GitHub OIDC attestation only after all files are
+staged.
 
 Stable and RC releases continue to use the schema-2 macOS-only manifest and
 the existing Python publisher compatibility path. Standalone Windows dispatches

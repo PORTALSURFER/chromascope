@@ -260,6 +260,7 @@ class WindowsReleaseHelperTests(unittest.TestCase):
         self.assertIn("toolchain: ${{ env.RUST_TOOLCHAIN }}", workflow)
         self.assertIn("RUST_TOOLCHAIN: 1.97.1", workflow)
         self.assertIn("RUST_TARGET: x86_64-pc-windows-msvc", workflow)
+        self.assertIn("persist-credentials: false", workflow)
         self.assertNotIn("id-token:", workflow)
         self.assertNotIn("secrets.", workflow)
         self.assertIn("name: chromascope-windows-${{ steps.metadata.outputs.build_id }}", workflow)

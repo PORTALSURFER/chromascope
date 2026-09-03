@@ -50,6 +50,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify dispatched source SHA
         id: source
@@ -178,6 +179,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify shared source identity
         env:
@@ -268,24 +270,44 @@ jobs:
               raise SystemExit("Windows release directory must contain only the archive and its sidecar")
           PY
 
-      - name: Checkout pinned PortalSurfer publisher
+      - name: Create scoped PortalSurfer publisher token
+        id: publisher_token
+        if: inputs.publish == true
+        uses: actions/create-github-app-token@7e473efe3cb98aa54f8d4bac15400b15fad77d94 # v2.2.0
+        with:
+          app-id: ${{ vars.PORTALSURFER_PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.PORTALSURFER_PUBLISHER_PRIVATE_KEY }}
+          owner: PORTALSURFER
+          repositories: portalsurfer.org
+          permission-contents: read
+      - name: Checkout exact PortalSurfer publisher
+        if: inputs.publish == true
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: PORTALSURFER/portalsurfer.org
+          ref: 165776d6707ab6d9e8bb76b2a8866654140ca6bc
+          token: ${{ steps.publisher_token.outputs.token }}
+          path: portalsurfer-publisher
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify and stage pinned PortalSurfer publisher
         id: publisher
         if: inputs.publish == true
         env:
-          PUBLISHER_REPOSITORY: https://github.com/PORTALSURFER/portalsurfer.org.git
           PUBLISHER_COMMIT: 165776d6707ab6d9e8bb76b2a8866654140ca6bc
         shell: bash
         run: |
           set -euo pipefail
-          publisher_dir="${RUNNER_TEMP}/portalsurfer-publisher"
-          git init --quiet "${publisher_dir}"
-          git -C "${publisher_dir}" remote add origin "${PUBLISHER_REPOSITORY}"
-          git -C "${publisher_dir}" fetch --depth 1 origin "${PUBLISHER_COMMIT}"
-          git -C "${publisher_dir}" checkout --quiet --detach "${PUBLISHER_COMMIT}"
+          publisher_dir="${GITHUB_WORKSPACE}/portalsurfer-publisher"
           test "$(git -C "${publisher_dir}" rev-parse HEAD)" = "${PUBLISHER_COMMIT}"
           ! git -C "${publisher_dir}" symbolic-ref --quiet HEAD
-          publisher_script="${publisher_dir}/scripts/publish-plugin-release.mjs"
-          test -f "${publisher_script}"
+          test -z "$(git -C "${publisher_dir}" status --porcelain --untracked-files=all)"
+          staged_publisher_dir="${RUNNER_TEMP}/portalsurfer-publisher"
+          rm -rf -- "${staged_publisher_dir}"
+          cp -a "${publisher_dir}" "${staged_publisher_dir}"
+          rm -rf -- "${publisher_dir}"
+          publisher_script="${staged_publisher_dir}/scripts/publish-plugin-release.mjs"
+          test -f "${publisher_script}" && test ! -L "${publisher_script}"
           echo "path=${publisher_script}" >> "$GITHUB_OUTPUT"
 
       - name: Produce and optionally publish Chromascope release

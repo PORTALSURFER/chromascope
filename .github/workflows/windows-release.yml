@@ -67,6 +67,7 @@ jobs:
         with:
           ref: ${{ inputs.source_sha != '' && inputs.source_sha || 'main' }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Capture checked-out source SHA
         id: source_sha
