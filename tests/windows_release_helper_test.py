@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import struct
 import sys
 import tempfile
@@ -272,6 +273,16 @@ class WindowsReleaseHelperTests(unittest.TestCase):
             "--python-version",
         ):
             self.assertIn(argument, workflow)
+
+    def test_windows_workflow_uses_source_sha_as_mode_discriminator(self) -> None:
+        """The required workflow_call-only source_sha separates calls from dispatches."""
+        workflow = (ROOT / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
+        self.assertIn("required workflow_call-only source_sha input is the mode discriminator", workflow)
+        self.assertIn("ref: ${{ inputs.source_sha != '' && inputs.source_sha || 'main' }}", workflow)
+        self.assertEqual(workflow.count("CALLED_MODE: ${{ inputs.source_sha != '' }}"), 2)
+        self.assertIn("if: inputs.source_sha != ''", workflow)
+        self.assertIn("if: inputs.source_sha == ''", workflow)
+        self.assertNotRegex(workflow, r"github\.event_name\s*(?:==|!=)\s*['\"]workflow_call['\"]")
 
 
 if __name__ == "__main__":
