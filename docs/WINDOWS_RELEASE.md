@@ -1,12 +1,14 @@
 # Windows release artifact
 
-`.github/workflows/windows-release.yml` is the independent Windows packaging
-lane. It is manually dispatched, checks out `main`, and builds only the
-x86_64-pc-windows-msvc VST3 target. The workflow pins the Windows Server
-generation to `windows-2022` and Rust to `1.97.1`; each manifest also records
-the concrete hosted-image and compiler details used for that build. The
-workflow never signs the binary, uses no certificate, uploads no catalog entry,
-and does not create or attach a GitHub Release.
+`.github/workflows/windows-release.yml` is the Windows packaging lane. It keeps
+its standalone `workflow_dispatch` inspection behavior, and also accepts a
+nightly-only `workflow_call` from `.github/workflows/release.yml`. Both modes
+check out the requested source and build only the x86_64-pc-windows-msvc VST3
+target. The workflow pins the Windows Server generation to `windows-2022` and
+Rust to `1.97.1`; each manifest also records the concrete hosted-image and
+compiler details used for that build. The workflow never signs the binary,
+uses no certificate, receives no Apple or PortalSurfer secret, uploads no
+catalog entry, and does not create or attach a GitHub Release.
 
 The Windows build emits the bundle under the repository's `dist/` directory:
 
@@ -86,6 +88,35 @@ run with:
 python3 -m unittest discover -s tests -p '*_test.py'
 ```
 
-The signed/notarized macOS release workflow remains the production publication
-path and is intentionally separate from this unsigned Windows inspection
-artifact.
+## Combined nightly publication
+
+The release workflow's prepare job computes one source SHA, package/publication
+version, build ID, and `released_at` value. A nightly passes all six values to
+the reusable Windows workflow, whose build ID is the shared
+`chromascope-v<publication-version>-<source-sha12>` identity. The final macOS
+job validates the sidecar again against `Cargo.lock` and the pinned VST3 SDK,
+checks every shared field, and passes the Windows directory to `scripts/release.sh`.
+The script copies only the validated Windows archive into the final release
+directory; `windows-artifact-manifest.json` is never part of the public bundle.
+
+The release-preflight producer lane builds the real macOS and Windows artifacts
+and runs `tests/release_pipeline_integration.py --mode artifact-contract`. That
+mode validates shared identity, schema 3, hashes, security metadata, and the
+exact five-file assembly scratch set without fetching the private publisher or
+reading secrets. A push to `main` additionally runs the protected
+`publisher-integration` job with `--mode publisher-integration`; it checks out
+the pinned private publisher with a contents-only GitHub App token and exercises
+only loopback API/OIDC mocks with fake credentials. It performs no real upload.
+
+The final macOS job builds the signed, notarized, stapled arm64 archive and
+publishes both platform archives in one PortalSurfer schema-3 release. Its
+per-artifact security evidence records the fixed Apple team ID for macOS and
+explicit `unsigned`/`null` certificate evidence for Windows. When `publish=true`,
+the protected production job uses the same scoped App-token checkout pattern;
+the PortalSurfer upload bearer remains `PORTALSURFER_RELEASE_TOKEN`, and the
+publisher obtains a short-lived GitHub OIDC attestation only after all files are
+staged.
+
+Stable and RC releases continue to use the schema-2 macOS-only manifest and
+the existing Python publisher compatibility path. Standalone Windows dispatches
+remain inspection-only and do not publish to PortalSurfer.

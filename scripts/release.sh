@@ -13,6 +13,10 @@ requested_publication_version=""
 build_id=""
 released_at=""
 source_ref=""
+requested_source_sha=""
+windows_release_dir=""
+publisher_script=""
+vst3_sdk_revision="58f8da7936800732561402d7936584ca4505de07"
 
 usage() {
   cat <<'EOF'
@@ -27,10 +31,15 @@ Options:
   --released-at ISO8601        Release timestamp (default: current UTC time)
   --endpoint URL               PortalSurfer origin (production is exact)
   --source-ref REF             Require a non-detached checkout of REF
+  --source-sha SHA             Require this exact source SHA
+  --windows-release-dir DIR    Validated Windows nightly artifact directory
+  --publisher-script PATH      Pinned Node publisher script for --publish
 
-Production is macOS arm64, one signed/notarized VST3 ZIP, one fresh screenshot,
-CHANGELOG.md, and one canonical manifest-v2 upload. Preflight produces an
-ad-hoc unsigned/notarized release for local inspection and never publishes.
+Production stable/RC is macOS arm64, one signed/notarized VST3 ZIP, one fresh
+screenshot, CHANGELOG.md, and one canonical manifest-v2 upload. Production
+nightly additionally requires one explicitly unsigned Windows x86_64 VST3 ZIP
+and emits one canonical manifest-v3 upload. Preflight produces an ad-hoc
+unsigned/notarized schema-2 release for local inspection and never publishes.
 Credentials are read only from the environment supplied by GitHub Actions.
 EOF
 }
@@ -49,6 +58,9 @@ while [[ $# -gt 0 ]]; do
     --released-at) released_at="${2:?missing released-at}"; shift 2 ;;
     --endpoint) endpoint="${2:?missing endpoint}"; shift 2 ;;
     --source-ref) source_ref="${2:?missing source ref}"; shift 2 ;;
+    --source-sha) requested_source_sha="${2:?missing source sha}"; shift 2 ;;
+    --windows-release-dir) windows_release_dir="${2:?missing Windows release directory}"; shift 2 ;;
+    --publisher-script) publisher_script="${2:?missing publisher script}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -59,6 +71,21 @@ done
   echo "invalid channel: ${channel}" >&2
   exit 2
 }
+if [[ -n "${publisher_script}" && "${mode}" != publish ]]; then
+  echo "--publisher-script requires --publish" >&2
+  exit 2
+fi
+if [[ "${mode}" == preflight || "${channel}" != nightly ]]; then
+  [[ -z "${windows_release_dir}" ]] || {
+    echo "--windows-release-dir is only valid for a production nightly" >&2
+    exit 2
+  }
+else
+  [[ -n "${windows_release_dir}" ]] || {
+    echo "production Chromascope nightly requires --windows-release-dir" >&2
+    exit 1
+  }
+fi
 [[ "$(uname -s)" == Darwin ]] || { echo "release packaging requires macOS" >&2; exit 1; }
 
 if [[ -n "${source_ref}" ]]; then
@@ -91,7 +118,18 @@ PY
 
 source_sha="$(git rev-parse HEAD)"
 [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "could not resolve an exact source SHA" >&2; exit 1; }
+if [[ -n "${requested_source_sha}" ]]; then
+  [[ "${requested_source_sha}" =~ ^[0-9a-f]{40}$ && "${requested_source_sha}" == "${source_sha}" ]] || {
+    echo "requested source SHA does not match checkout HEAD" >&2
+    exit 1
+  }
+fi
 if [[ "${mode}" != preflight ]]; then
+  current_ref="$(git symbolic-ref --quiet --short HEAD || true)"
+  [[ "${current_ref}" == main ]] || {
+    echo "production release source must be a non-detached main checkout" >&2
+    exit 1
+  }
   git fetch origin main --quiet
   canonical_main="$(git rev-parse refs/remotes/origin/main 2>/dev/null || true)"
   [[ -n "${canonical_main}" && "${source_sha}" == "${canonical_main}" ]] || {
@@ -101,6 +139,13 @@ if [[ "${mode}" != preflight ]]; then
 fi
 build_id="${build_id:-${slug}-v${publication_version}-${source_sha:0:12}}"
 [[ "${build_id}" =~ ^[a-z0-9][a-z0-9._-]{1,127}$ ]] || { echo "invalid build id" >&2; exit 2; }
+if [[ "${mode}" != preflight && "${channel}" == nightly ]]; then
+  expected_build_id="${slug}-v${publication_version}-${source_sha:0:12}"
+  [[ "${build_id}" == "${expected_build_id}" ]] || {
+    echo "production nightly build id must be ${expected_build_id}" >&2
+    exit 1
+  }
+fi
 released_at="${released_at:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 [[ -s CHANGELOG.md ]] || { echo "CHANGELOG.md must not be empty" >&2; exit 1; }
 
@@ -113,6 +158,15 @@ if [[ "${mode}" == publish ]]; then
     echo "production publishing requires exact origin https://portalsurfer.org" >&2
     exit 1
   }
+  if [[ -n "${publisher_script}" ]]; then
+    [[ -f "${publisher_script}" && ! -L "${publisher_script}" ]] || {
+      echo "--publisher-script must point to a regular file" >&2
+      exit 1
+    }
+  elif [[ "${channel}" == nightly ]]; then
+    echo "production nightly publishing requires the pinned Node publisher script" >&2
+    exit 1
+  fi
 fi
 : "${VST3_SDK_DIR:?VST3_SDK_DIR must point to a VST3 SDK checkout}"
 [[ -d "${VST3_SDK_DIR}/pluginterfaces" ]] || {
@@ -135,6 +189,59 @@ else
   done
 fi
 
+windows_release_root=""
+windows_archive_name=""
+if [[ "${distribution}" == production && "${channel}" == nightly ]]; then
+  windows_release_root="$(cd "${windows_release_dir}" 2>/dev/null && pwd -P)" || {
+    echo "Windows release directory is not available: ${windows_release_dir}" >&2
+    exit 1
+  }
+  PYTHONDONTWRITEBYTECODE=1 python3 scripts/windows_release_helper.py validate \
+    --root "${windows_release_root}" \
+    --cargo-lock Cargo.lock \
+    --vst3-sdk-revision "${vst3_sdk_revision}"
+  PYTHONDONTWRITEBYTECODE=1 python3 - "${windows_release_root}" "${package_version}" "${publication_version}" "${build_id}" "${released_at}" "${source_sha}" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+package_version, publication_version, build_id, released_at, source_sha = sys.argv[2:]
+manifest_path = root / "windows-artifact-manifest.json"
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+expected_archive = f"chromascope-v{publication_version}-windows-x86_64-unsigned.vst3.zip"
+expected_build_id = f"chromascope-v{publication_version}-{source_sha[:12]}"
+source = manifest.get("source")
+if (
+    manifest.get("schema_version") != 1
+    or manifest.get("product") != "chromascope"
+    or manifest.get("format") != "vst3"
+    or manifest.get("platform") != "windows"
+    or manifest.get("architecture") != "x86_64"
+    or manifest.get("package_version") != package_version
+    or manifest.get("publication_version") != publication_version
+    or manifest.get("channel") != "nightly"
+    or manifest.get("build_id") != expected_build_id
+    or manifest.get("build_id") != build_id
+    or manifest.get("released_at") != released_at
+    or not isinstance(source, dict)
+    or source.get("git_sha") != source_sha
+    or source.get("repository") != "PORTALSURFER/chromascope"
+    or source.get("dirty") is not False
+    or manifest.get("signing_status") != "unsigned"
+    or manifest.get("signing_certificate") is not None
+    or not isinstance(manifest.get("archive"), dict)
+    or manifest["archive"].get("name") != expected_archive
+):
+    raise SystemExit("Windows artifact manifest does not match the shared nightly identity")
+entries = list(root.iterdir())
+expected_entries = {"windows-artifact-manifest.json", expected_archive}
+if {entry.name for entry in entries} != expected_entries or any(entry.is_symlink() or not entry.is_file() for entry in entries):
+    raise SystemExit("Windows release directory must contain only the archive and its sidecar")
+PY
+  windows_archive_name="chromascope-v${publication_version}-windows-x86_64-unsigned.vst3.zip"
+fi
+
 release_dir="${repo_root}/dist/releases/${build_id}"
 rm -rf -- "${release_dir}"
 mkdir -p "${release_dir}" "${repo_root}/target"
@@ -152,6 +259,10 @@ cleanup() {
   rm -rf -- "${tmp_root}"
 }
 trap cleanup EXIT
+
+if [[ -n "${windows_archive_name}" ]]; then
+  cp "${windows_release_root}/${windows_archive_name}" "${release_dir}/${windows_archive_name}"
+fi
 
 signing_team_id=""
 vst3_notary_id=""
@@ -281,7 +392,7 @@ if [[ "${distribution}" == production ]]; then
 fi
 
 cp CHANGELOG.md "${release_dir}/CHANGELOG.md"
-python3 - "${release_dir}" "${publication_version}" "${build_id}" "${channel}" "${released_at}" "${source_sha}" "${distribution}" "${signing_team_id}" "${vst3_notary_id}" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 python3 - "${release_dir}" "${publication_version}" "${build_id}" "${channel}" "${released_at}" "${source_sha}" "${distribution}" "${signing_team_id}" "${vst3_notary_id}" "${windows_archive_name}" <<'PY'
 import pathlib
 import sys
 
@@ -289,9 +400,10 @@ folder = pathlib.Path(sys.argv[1])
 sys.path.insert(0, str(folder.parents[1].parent / "scripts"))
 from release_helper import build_manifest, canonical_json, validate_manifest
 
-out, publication_version, build_id, channel, released_at, source_sha, distribution, team_id, notary_id = sys.argv[1:]
+out, publication_version, build_id, channel, released_at, source_sha, distribution, team_id, notary_id, windows_archive_name = sys.argv[1:]
 vst3 = folder / f"chromascope-v{publication_version}-macos.vst3.zip"
 screenshot = next(folder.glob("chromascope-default-*.png"))
+windows_vst3 = folder / windows_archive_name if windows_archive_name else None
 manifest = build_manifest(
     product="chromascope",
     repository="PORTALSURFER/chromascope",
@@ -306,13 +418,20 @@ manifest = build_manifest(
     distribution=distribution,
     signing_team_id=team_id,
     vst3_notary_id=notary_id,
+    windows_vst3=windows_vst3,
 )
 (folder / "release-manifest.json").write_bytes(canonical_json(manifest))
 validate_manifest(manifest, folder)
 PY
 
 if [[ "${mode}" == publish ]]; then
-  python3 - "${release_dir}" "${endpoint}" <<'PY'
+  if [[ -n "${publisher_script}" ]]; then
+    node "${publisher_script}" \
+      --manifest "${release_dir}/release-manifest.json" \
+      --root "${release_dir}" \
+      --endpoint "${endpoint}"
+  else
+    PYTHONDONTWRITEBYTECODE=1 python3 - "${release_dir}" "${endpoint}" <<'PY'
 import json
 import os
 import pathlib
@@ -330,5 +449,6 @@ publish_release(
     repo_root=root.parents[2],
 )
 PY
+  fi
 fi
 echo "[release] ${mode} VST3 bundle ready: ${release_dir}"
